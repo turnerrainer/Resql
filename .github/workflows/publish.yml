@@ -1,0 +1,147 @@
+name: publish
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+      - "v[0-9]+.[0-9]+.[0-9]+-*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to (re-)publish, e.g. v0.1.0-rc.1"
+        required: true
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write   # cosign keyless via GHA OIDC
+
+env:
+  DOCKER_HUB_IMAGE: docker.io/turnerrainer/resql-on-rust
+  GHCR_IMAGE: ghcr.io/turnerrainer/resql-on-rust
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ github.event.inputs.tag }}"
+          else
+            TAG="${GITHUB_REF#refs/tags/}"
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.tag.outputs.tag }}
+
+      - name: Compose tag list
+        id: tags
+        run: |
+          TAG='${{ steps.tag.outputs.tag }}'
+          VERSION="${TAG#v}"                             # 0.1.0 or 0.1.0-rc.2
+          MAJOR_MINOR="${VERSION%.*}"
+          TAG_LIST=""
+          if [[ "$VERSION" == *-* ]]; then
+            # Pre-release: version + channel suffix (rc/beta/alpha/preview).
+            SUFFIX="${VERSION#*-}"        # rc.2 / beta.1 / preview
+            CHANNEL="${SUFFIX%%.*}"       # rc / beta / alpha / preview
+            for image in "${{ env.DOCKER_HUB_IMAGE }}" "${{ env.GHCR_IMAGE }}"; do
+              TAG_LIST+="${image}:${VERSION}\n"
+              TAG_LIST+="${image}:${CHANNEL}\n"
+            done
+          else
+            for image in "${{ env.DOCKER_HUB_IMAGE }}" "${{ env.GHCR_IMAGE }}"; do
+              TAG_LIST+="${image}:${VERSION}\n"
+              TAG_LIST+="${image}:${MAJOR_MINOR}\n"
+              TAG_LIST+="${image}:latest\n"
+            done
+          fi
+          echo -e "$TAG_LIST" | sed '/^$/d' > /tmp/tags.txt
+          {
+            echo 'tags<<EOF'
+            cat /tmp/tags.txt
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Reproducible layer timestamps
+        run: |
+          echo "SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct)" >> "$GITHUB_ENV"
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build + push multi-arch
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.tags.outputs.tags }}
+          provenance: mode=max
+          sbom: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max,ignore-error=true
+          outputs: |
+            type=image,rewrite-timestamp=true
+
+      - name: Trivy scan (block HIGH/CRITICAL)
+        uses: aquasecurity/trivy-action@0.24.0
+        with:
+          image-ref: ${{ env.GHCR_IMAGE }}@${{ steps.build.outputs.digest }}
+          exit-code: "1"
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+
+      - name: Smoke test both arches
+        run: |
+          set -euo pipefail
+          for arch in amd64 arm64; do
+            docker rmi "${{ env.GHCR_IMAGE }}:${{ steps.tag.outputs.tag == '' && 'latest' || steps.tag.outputs.tag }}" 2>/dev/null || true
+            docker pull --platform "linux/${arch}" "${{ env.GHCR_IMAGE }}@${{ steps.build.outputs.digest }}"
+            cid=$(docker run -d --rm --platform "linux/${arch}" -p 18080:8080 \
+                    "${{ env.GHCR_IMAGE }}@${{ steps.build.outputs.digest }}")
+            for _ in $(seq 1 30); do
+              sleep 1
+              if curl -fsS http://127.0.0.1:18080/health; then
+                echo " ← ${arch} healthy"
+                break
+              fi
+            done
+            docker stop "$cid" >/dev/null
+          done
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign both images keyless
+        env:
+          COSIGN_EXPERIMENTAL: "true"
+        run: |
+          set -e
+          while IFS= read -r ref; do
+            [ -z "$ref" ] && continue
+            cosign sign --yes "${ref}@${{ steps.build.outputs.digest }}"
+          done < /tmp/tags.txt

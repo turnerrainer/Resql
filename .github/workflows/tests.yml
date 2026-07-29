@@ -1,0 +1,78 @@
+name: tests
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main, dev]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  build-test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.88.0
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry + build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-${{ runner.arch }}-cargo-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-cargo-
+
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy -D warnings
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: cargo build --release
+        run: cargo build --release --locked --bin resql-on-rust
+
+      - name: cargo test --no-fail-fast
+        run: cargo test --no-fail-fast --locked
+
+  docs-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install mdBook (pinned)
+        run: |
+          MDBOOK_VERSION=0.4.40
+          LINKCHECK_VERSION=0.7.7
+          mkdir -p ~/.local/bin
+          curl -sSL "https://github.com/rust-lang/mdBook/releases/download/v${MDBOOK_VERSION}/mdbook-v${MDBOOK_VERSION}-x86_64-unknown-linux-gnu.tar.gz" \
+            | tar -xz -C ~/.local/bin
+          curl -sSL "https://github.com/Michael-F-Bryan/mdbook-linkcheck/releases/download/v${LINKCHECK_VERSION}/mdbook-linkcheck.x86_64-unknown-linux-gnu.zip" \
+            -o /tmp/linkcheck.zip
+          unzip -q /tmp/linkcheck.zip -d ~/.local/bin
+          chmod +x ~/.local/bin/mdbook-linkcheck
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Sync CHANGELOG.md → book/src/reference/changelog.md
+        run: cp CHANGELOG.md book/src/reference/changelog.md
+
+      - name: mdbook build (with linkcheck)
+        run: mdbook build book

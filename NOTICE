@@ -1,0 +1,13 @@
+Resql-on-Rust
+Copyright 2026 Rainer Türner
+
+This product is a Rust rewrite of the original Resql Spring Boot service
+first developed at Bürokratt (https://github.com/buerokratt/Resql) in
+August 2022 as part of the Bürokratt / Bükstack ecosystem.
+
+The original Java implementation is licensed separately; consult the
+upstream repository for its terms. This rewrite is an independent work
+under the Apache License 2.0 and shares no code with the upstream
+implementation. Interface compatibility (SQL-file-to-endpoint semantics,
+JSON parameter binding, snake_case → camelCase result column renaming)
+is intentional and follows public interface documentation.

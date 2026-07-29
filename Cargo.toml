@@ -1,0 +1,49 @@
+[package]
+name = "resql-on-rust"
+version = "0.1.0-rc.1"
+edition = "2021"
+rust-version = "1.88"
+license = "Apache-2.0"
+description = "SQL-files-as-REST-endpoints microservice (Rust rewrite of Buerostack Resql)"
+repository = "https://github.com/turnerrainer/Resql-on-Rust"
+readme = "README.md"
+
+[[bin]]
+name = "resql-on-rust"
+path = "src/main.rs"
+
+[lib]
+name = "resql_on_rust"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = "1.0"
+axum = { version = "0.7", default-features = false, features = ["http1", "json", "matched-path", "tokio", "query"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+clap = { version = "4.5", default-features = false, features = ["std", "derive", "env", "help", "usage", "error-context"] }
+futures-util = { version = "0.3", default-features = false }
+uuid = { version = "1.10", features = ["v4", "serde"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0", features = ["preserve_order"] }
+serde_yaml_ng = "0.10"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "postgres", "sqlite", "json", "chrono", "uuid"] }
+thiserror = "2.0"
+time = { version = "0.3", default-features = false, features = ["formatting", "macros", "std"] }
+tokio = { version = "1.40", features = ["macros", "rt-multi-thread", "signal"] }
+tower = { version = "0.5", default-features = false, features = ["util"] }
+tower-http = { version = "0.6", default-features = false, features = ["cors", "trace", "limit"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["env-filter", "fmt", "json"] }
+
+[dev-dependencies]
+axum = { version = "0.7", default-features = false, features = ["http1", "json", "matched-path", "tokio", "query"] }
+http-body-util = "0.1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tempfile = "3.10"
+tokio = { version = "1.40", features = ["macros", "rt-multi-thread", "signal", "test-util", "time"] }
+tower = { version = "0.5", default-features = false, features = ["util"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

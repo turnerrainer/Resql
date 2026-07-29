@@ -1,0 +1,10 @@
+/target
+/book/book
+/.env
+.env.local
+*.log
+/logs
+.claude/
+.idea/
+.vscode/
+*.iml

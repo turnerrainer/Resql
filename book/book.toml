@@ -1,0 +1,19 @@
+[book]
+title = "Resql-on-Rust"
+description = "SQL-files-as-REST-endpoints microservice"
+authors = ["Rainer Türner"]
+language = "en"
+src = "src"
+
+[build]
+build-dir = "book"
+
+[output.html]
+default-theme = "light"
+preferred-dark-theme = "navy"
+git-repository-url = "https://github.com/turnerrainer/Resql-on-Rust"
+edit-url-template = "https://github.com/turnerrainer/Resql-on-Rust/edit/dev/book/{path}"
+
+[output.linkcheck]
+follow-web-links = false
+warning-policy = "error"

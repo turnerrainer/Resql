@@ -1,0 +1,38 @@
+services:
+  resql:
+    image: turnerrainer/resql-on-rust:0.1.0-rc.1
+    container_name: resql-on-rust
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    # Override any of these to point at a live datasource. The image ships
+    # with a self-contained SQLite demo so `docker compose up` works with
+    # no further setup.
+    # environment:
+    #   RESQL_LOG: "info,resql_on_rust=debug"
+    # volumes:
+    #   - ./resql.yaml:/app/resql.yaml:ro
+    #   - ./sql:/app/sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp:size=64M
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 512M
+        reservations:
+          cpus: "0.25"
+          memory: 128M
+    # read_only stays disabled by default: SQLite may need to write to its
+    # database file. Enable if you point exclusively at remote datasources.
+    # read_only: true

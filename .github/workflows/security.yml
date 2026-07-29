@@ -1,0 +1,37 @@
+name: security
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main, dev]
+  schedule:
+    # Daily at 06:15 UTC — catches new advisories against pinned deps
+    # before the next PR triggers them.
+    - cron: "15 6 * * *"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  audit-deny:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.88.0
+
+      - name: Install cargo-audit + cargo-deny
+        run: |
+          cargo install --locked cargo-audit --version 0.21.1
+          cargo install --locked cargo-deny  --version 0.16.4
+
+      - name: cargo audit --deny warnings
+        run: cargo audit --deny warnings
+
+      - name: cargo deny check all
+        run: cargo deny check all
