@@ -89,10 +89,10 @@ mod tests {
 
     #[test]
     fn unknown_datasource_matches_java_message() {
-        let e = ResqlError::UnknownDataSource("byk".into());
+        let e = ResqlError::UnknownDataSource("orders".into());
         assert_eq!(
             e.to_string(),
-            "Specified dataSourceName name: 'byk' is unknown to the service"
+            "Specified dataSourceName name: 'orders' is unknown to the service"
         );
         assert_eq!(e.kind(), "UnknownDataSourceNameException");
     }

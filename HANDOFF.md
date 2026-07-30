@@ -25,7 +25,7 @@ Interface-compatible Rust rewrite of the [Bürokratt Resql](https://github.com/b
 
 ## What's fixed vs JVM Resql
 
-- Datasource-by-project routing works (JVM version had hardcoded `"byk"`).
+- Multi-database routing works out of the box; the shipped `resql.yaml` wires two datasources (`users` + `audit`) so `docker run` demonstrates the feature (JVM version silently hardcoded a single datasource name).
 - Startup refuses to boot on any misconfigured datasource.
 - Config file never holds passwords — env-var references only.
 - Body-size cap (default 1 MiB, structured 413 on overflow).
@@ -50,9 +50,11 @@ docker build -t resql-on-rust:local .
 docker run -d --name resql-smoke -p 18080:8080 resql-on-rust:local
 sleep 2
 curl http://localhost:18080/health
-curl "http://localhost:18080/demo/hello?name=world"
+curl http://localhost:18080/datasources    # two datasources listed
+curl "http://localhost:18080/users/hello?name=world"
 curl -X POST -H "content-type: application/json" -d '{"msg":"pong"}' \
-     http://localhost:18080/demo/echo
+     http://localhost:18080/users/echo
+curl "http://localhost:18080/audit/tail?n=42"
 docker stop resql-smoke && docker rm resql-smoke
 ```
 

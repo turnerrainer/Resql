@@ -42,7 +42,7 @@ Container:
 
 - Multi-stage: `rust:1.88-slim` builder → `debian:bookworm-slim` runtime.
 - Non-root UID 1000, tini as PID 1, curl for HEALTHCHECK.
-- Bakes `resql.yaml` + `sql/demo/` demo files — image runs standalone.
+- Bakes `resql.yaml` + `sql/users/` + `sql/audit/` demo files (two datasources, demonstrating multi-database routing) — image runs standalone.
 
 CI:
 

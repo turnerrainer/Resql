@@ -36,26 +36,40 @@ From source:
 
 ## 3. Verify
 
+The shipped image wires two datasources (`users` and `audit`) so you can
+see multi-database routing without any config.
+
 ```bash
 curl http://localhost:8080/health
 # {"appName":"resql-on-rust","version":"0.1.0-rc.1","appStartTime":..., "serverTime":..., "status":"UP"}
 
-curl "http://localhost:8080/demo/hello?name=world"
-# [{"greeting":"hello, world!"}]
+curl http://localhost:8080/datasources
+# [{"name":"audit","url":"sqlite::memory:","driver":"sqlite"},
+#  {"name":"users","url":"sqlite::memory:","driver":"sqlite"}]
 
-curl -X POST http://localhost:8080/demo/echo \
+# Hits the users datasource (URL project = users):
+curl "http://localhost:8080/users/hello?name=world"
+# [{"greeting":"hello from users db, world!"}]
+
+curl -X POST http://localhost:8080/users/echo \
      -H "content-type: application/json" \
      -d '{"msg":"pong"}'
-# [{"echoed":"pong"}]
+# [{"echoed":"pong","servedFrom":"users"}]
 
-curl http://localhost:8080/datasources
-# [{"name":"demo","url":"sqlite::memory:","driver":"sqlite"}]
+# Hits the audit datasource (URL project = audit):
+curl "http://localhost:8080/audit/tail?n=42"
+# [{"entry":"audit entry 42","rowId":42}]
+
+# Force any endpoint onto any datasource with X-Datasource:
+curl "http://localhost:8080/users/hello?name=world" \
+     -H "X-Datasource: audit"
+# [{"greeting":"hello from users db, world!"}]   ← same SQL, different pool
 ```
 
 ## 4. Add your first endpoint
 
-The demo image bakes `sql/demo/GET/hello.sql` in. For your own endpoints
-you'll want to mount a directory over `/app/sql`.
+The demo image bakes `sql/users/*` and `sql/audit/*` in. For your own
+endpoints you'll want to mount a directory over `/app/sql`.
 
 Create a file `./mysql/users/GET/find-by-login.sql`:
 

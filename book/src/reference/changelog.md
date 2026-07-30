@@ -33,7 +33,7 @@ Spring Boot service. Interface-compatible with the original for the SQL-file-to-
 
 ### Fixed (vs JVM Resql)
 
-- Datasource-by-project routing (JVM version hardcoded `"byk"`).
+- Datasource-by-project routing (JVM version hardcoded a single datasource name — multi-database deployments were impossible without patching the source).
 - Startup refuses to boot on any misconfigured datasource (JVM version silently ignored several).
 - Passwords never appear in config file (JVM defaulted keystore password to `"123456"`).
 - Request body cap prevents unbounded memory growth.

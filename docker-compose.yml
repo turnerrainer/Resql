@@ -5,9 +5,9 @@ services:
     restart: unless-stopped
     ports:
       - "8080:8080"
-    # Override any of these to point at a live datasource. The image ships
-    # with a self-contained SQLite demo so `docker compose up` works with
-    # no further setup.
+    # Override any of these to point at live datasources. The image ships
+    # with a self-contained SQLite demo (two datasources: `users` + `audit`)
+    # so `docker compose up` works with no further setup.
     # environment:
     #   RESQL_LOG: "info,resql_on_rust=debug"
     # volumes:

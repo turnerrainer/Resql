@@ -116,7 +116,7 @@ The 400-for-everything shape is inherited from JVM Resql for compatibility. Cons
 
 | Behaviour | JVM Resql | Resql-on-Rust |
 |---|---|---|
-| Datasource by URL project | ❌ hardcoded `"byk"` | ✅ project → datasource, header override, config map |
+| Datasource by URL project | ❌ hardcoded to a single datasource name; multi-database impossible without a source patch | ✅ project → datasource, header override, config map |
 | Config validation | Partial (some datasources default silently) | Full: refuses to boot on any misconfig |
 | Password storage | Plaintext in `application.yml` (default `"123456"` for keystore) | Env-var references only; startup refuses if unset |
 | Request body cap | Uncapped | Default 1 MiB, structured 413 |

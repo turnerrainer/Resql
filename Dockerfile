@@ -24,8 +24,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY --from=builder /build/target/release/resql-on-rust /app/resql-on-rust
 
-# Ship a working demo out of the box: a SQLite-backed "demo" project
-# with one GET and one POST endpoint. Operators mount over this in prod.
+# Ship a working multi-database demo out of the box: two SQLite datasources
+# (`users` and `audit`) wired to two URL projects. Operators mount their
+# own resql.yaml + sql/ in production; the demo just proves the wiring works.
 COPY resql.yaml /app/resql.yaml
 COPY sql /app/sql
 

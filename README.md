@@ -10,10 +10,15 @@ Spring Boot service.
 
 ## One-command demo
 
+The shipped image wires **two** SQLite datasources (`users` and `audit`)
+so multi-database routing works out of the box.
+
 ```bash
 docker run --rm -p 8080:8080 turnerrainer/resql-on-rust:0.1.0-rc.1
-curl "http://localhost:8080/demo/hello?name=world"
-# [{"greeting":"hello, world!"}]
+curl "http://localhost:8080/users/hello?name=world"
+# [{"greeting":"hello from users db, world!"}]
+curl "http://localhost:8080/audit/tail?n=42"
+# [{"entry":"audit entry 42","rowId":42}]     ← different backend, same server
 ```
 
 ## Docs

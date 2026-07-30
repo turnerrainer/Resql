@@ -4,6 +4,12 @@
 # vars follow the pattern RESQL__<UPPERCASE_KEY> with `__` for nesting.
 # Passwords are NEVER stored in this file — point at env var names via
 # `password_env`.
+#
+# The shipped configuration wires up TWO SQLite-in-memory datasources
+# (`users` and `audit`) to demonstrate multi-database routing out of the
+# box. `POST /users/echo` and `POST /audit/write` route to different
+# backends by URL segment; add an `X-Datasource: <name>` header to
+# override.
 
 server:
   # Bind address and port for the HTTP listener.
@@ -30,17 +36,22 @@ project_datasource_map: {}
 allow_datasource_header: true
 
 datasources:
-  # Sample entry. Duplicate this block for each backend.
-  - name: demo
-    # JDBC-style URL. Supported prefixes: postgres://, postgresql://, sqlite:
+  # Primary backend for the `users` URL project. SQLite in-memory in the
+  # shipped image; replace with a real Postgres URL in production.
+  - name: users
     url: "sqlite::memory:"
-    # Env-var NAME holding the password. Startup refuses if the var is unset
-    # while this section is configured with a non-empty username.
     username: ""
     password_env: ""
-    # Connection pool size ceiling.
     max_connections: 10
-    # Per-acquire timeout (seconds).
+    acquire_timeout_seconds: 5
+
+  # Second backend for the `audit` URL project. Proves multi-database
+  # routing on the demo image — each project talks to a different pool.
+  - name: audit
+    url: "sqlite::memory:"
+    username: ""
+    password_env: ""
+    max_connections: 5
     acquire_timeout_seconds: 5
 
 cors:
