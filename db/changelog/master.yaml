@@ -1,0 +1,24 @@
+# Liquibase master changelog for Resql-on-Rust.
+#
+# This file is applied OUT OF BAND — Resql-on-Rust itself never touches
+# schema. Point Liquibase at your database as part of your deployment
+# pipeline (init container, one-shot job, or the Makefile targets in
+# this repo for local test runs).
+#
+# Contexts:
+#   test   — includes seed data used by the Rust integration suite.
+#            Never apply in production.
+#   (none) — schema only. This is the production posture.
+#
+# Example invocations:
+#   liquibase --url=... --changeLogFile=master.yaml --contexts=test update
+#   liquibase --url=... --changeLogFile=master.yaml update
+#
+# See book/src/postgres-setup.md for the full deployment recipe.
+databaseChangeLog:
+  - include:
+      file: 001-schema.yaml
+      relativeToChangelogFile: true
+  - include:
+      file: 002-test-fixtures.yaml
+      relativeToChangelogFile: true

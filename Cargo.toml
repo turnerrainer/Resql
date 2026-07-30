@@ -26,7 +26,7 @@ uuid = { version = "1.10", features = ["v4", "serde"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["preserve_order"] }
 serde_yaml_ng = "0.10"
-sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "postgres", "sqlite", "json", "chrono", "uuid"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "postgres", "sqlite", "json", "chrono", "uuid", "rust_decimal"] }
 thiserror = "2.0"
 time = { version = "0.3", default-features = false, features = ["formatting", "macros", "std"] }
 tokio = { version = "1.40", features = ["macros", "rt-multi-thread", "signal"] }

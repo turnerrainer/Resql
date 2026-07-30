@@ -1,7 +1,7 @@
 # HANDOFF
 
-**Written:** 2026-07-29
-**Last verified green (local):** 2026-07-29 — cargo test 77/0/0 (49 unit + 28 integration); fmt + clippy -D warnings clean; mdbook build clean.
+**Written:** 2026-07-29 (Postgres/Liquibase addendum 2026-07-30)
+**Last verified green (local):** 2026-07-30 — cargo test 93/0/0 with `TEST_POSTGRES_URL` set (49 unit + 44 integration incl. 16 Postgres); fmt + clippy -D warnings clean; cargo audit + deny clean; mdbook + linkcheck clean; docker build + smoke pass on the multi-DB demo.
 **Branch:** `dev` — ready to tag `v0.1.0-rc.1`.
 **Release status:** Local artifacts complete; the tag push + Docker Hub + GHCR publish is the operator step (§9 in `../DEV-REQUIREMENTS.md`).
 
@@ -33,6 +33,8 @@ Interface-compatible Rust rewrite of the [Bürokratt Resql](https://github.com/b
 
 ## Verification set (all should exit 0)
 
+Fast path (SQLite integration only, no external services):
+
 ```bash
 cargo fmt --check
 cargo clippy --all-targets --locked -- -D warnings
@@ -40,8 +42,18 @@ cargo build --release --locked --bin resql-on-rust
 cargo test --no-fail-fast --locked
 cargo audit --deny warnings         # requires: cargo install cargo-audit
 cargo deny check all                # requires: cargo install cargo-deny
-( cd book && mdbook build )
+mdbook build book                   # requires mdbook 0.4.40 + linkcheck 0.7.7
 ```
+
+Full path (also runs Postgres integration suite — needs docker):
+
+```bash
+make test-all       # spins Postgres 16 + applies Liquibase changelog, then cargo test
+make pg-down        # tear down when finished
+```
+
+CI runs the full path on every push. Local devs can stick to the fast
+path — Postgres tests skip cleanly without `TEST_POSTGRES_URL`.
 
 Live smoke:
 
@@ -148,15 +160,15 @@ Landed (see [CHANGELOG.md](./CHANGELOG.md)):
 
 - ✅ Task 001 — domain deep-dive → `docs/DESIGN.md`
 - ✅ Task 002 — MVP per DESIGN §8
+- ✅ Task 006 — Postgres integration tests + Liquibase-managed schema (2026-07-30)
 
 Open backlog:
 
 | Task | Location | Notes |
 |---|---|---|
 | 003 | `tasks/backlog/003-transaction-scoping.md` | Optional transaction wrapper for POST endpoints |
-| 004 | `tasks/backlog/004-opentelemetry-wire-up.md` | Actually export OTLP traces (currently deps-only, unused) |
+| 004 | `tasks/backlog/004-opentelemetry-wire-up.md` | Actually export OTLP traces (currently no OTel deps) |
 | 005 | `tasks/backlog/005-mysql-driver-optional.md` | Consider MySQL — needs STANDARDS §"driver support" review |
-| 006 | `tasks/backlog/006-postgres-integration-tests.md` | testcontainers-rs Postgres in CI; SQLite tests only for now |
 
 ## Where to look for more detail
 

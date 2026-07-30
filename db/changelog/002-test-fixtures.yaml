@@ -1,0 +1,98 @@
+# Test-only seed data. Applied when `--contexts=test` is passed to
+# Liquibase; skipped in production runs. The Rust integration suite
+# under `tests/integration_postgres.rs` reads these rows.
+
+databaseChangeLog:
+  - changeSet:
+      id: fixtures-users
+      author: rainer
+      context: test
+      changes:
+        - insert:
+            tableName: users
+            columns:
+              - column: {name: login, value: alice}
+              - column: {name: email, value: alice@example.com}
+              - column: {name: status, value: active}
+        - insert:
+            tableName: users
+            columns:
+              - column: {name: login, value: bob}
+              - column: {name: email, value: bob@example.com}
+              - column: {name: status, value: active}
+        - insert:
+            tableName: users
+            columns:
+              - column: {name: login, value: charlie}
+              - column: {name: email, value: charlie@example.com}
+              - column: {name: status, value: disabled}
+
+  - changeSet:
+      id: fixtures-audit-log
+      author: rainer
+      context: test
+      changes:
+        - insert:
+            tableName: audit_log
+            columns:
+              - column: {name: actor, value: alice}
+              - column: {name: action, value: login}
+        - insert:
+            tableName: audit_log
+            columns:
+              - column: {name: actor, value: bob}
+              - column: {name: action, value: login}
+        - insert:
+            tableName: audit_log
+            columns:
+              - column: {name: actor, value: alice}
+              - column: {name: action, value: create_order}
+
+  - changeSet:
+      id: fixtures-orders
+      author: rainer
+      context: test
+      changes:
+        - sql:
+            sql: |
+              INSERT INTO orders (user_id, total_cents, items) VALUES
+                ((SELECT id FROM users WHERE login = 'alice'), 1999,
+                 '[{"sku":"A1","qty":2},{"sku":"B2","qty":1}]'::jsonb),
+                ((SELECT id FROM users WHERE login = 'bob'), 4550,
+                 '[{"sku":"C3","qty":5}]'::jsonb),
+                ((SELECT id FROM users WHERE login = 'alice'), 7500,
+                 '[{"sku":"D4","qty":1},{"sku":"E5","qty":3}]'::jsonb);
+
+  - changeSet:
+      id: fixtures-flags
+      author: rainer
+      context: test
+      changes:
+        - insert:
+            tableName: flags
+            columns:
+              - column: {name: name, value: dark_mode}
+              - column: {name: enabled, valueBoolean: true}
+        - insert:
+            tableName: flags
+            columns:
+              - column: {name: name, value: legacy_api}
+              - column: {name: enabled, valueBoolean: false}
+        - insert:
+            tableName: flags
+            columns:
+              - column: {name: name, value: beta_features}
+              - column: {name: enabled, valueBoolean: true}
+
+  - changeSet:
+      id: fixtures-daily-stats
+      author: rainer
+      context: test
+      changes:
+        - sql:
+            sql: |
+              INSERT INTO daily_stats (day, region, revenue) VALUES
+                ('2026-07-01', 'EMEA',  12345.67),
+                ('2026-07-01', 'APAC',   9876.54),
+                ('2026-07-02', 'EMEA',  13400.00),
+                ('2026-07-02', 'APAC',  10200.00);

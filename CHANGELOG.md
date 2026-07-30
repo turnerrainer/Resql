@@ -6,6 +6,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Postgres integration test suite (`tests/integration_postgres.rs`, 16 tests) covering type mapping (JSONB, TIMESTAMPTZ, NUMERIC, BOOLEAN, DATE), snake→camel columns, INSERT+RETURNING, batch endpoint, SQL errors, and password masking. Skips silently without `TEST_POSTGRES_URL`.
+- Liquibase-managed schema and test fixtures (`db/changelog/master.yaml` + `001-schema.yaml` + `002-test-fixtures.yaml`). Test-only data is gated on `context: test` so production applications never see it.
+- CI (`tests.yml`): Postgres 16 service container + Liquibase update step (`--contexts=test`) on both amd64 and arm64 matrix rows.
+- `Makefile` with `pg-up` / `pg-schema` / `test-pg` / `test-all` targets for local Postgres development.
+- New book chapter `book/src/postgres-setup.md` covering the Liquibase pattern, test workflow, and deployment recipes (init container + one-shot job).
+
+### Changed
+- Postgres testing promoted from backlog task 006 to a first-class CI requirement. The runtime image still ships without Liquibase or a JVM — schema is applied out-of-band.
+
+### Fixed
+- Postgres INT4 columns now decode correctly (previously fell through to `null` because the extractor only tried `i64`; sqlx-postgres decodes INT4 as `i32`). Surfaced by the new Postgres suite — exactly why it exists.
+- Postgres NUMERIC columns preserve full precision as a JSON string (previously `null` because the required `rust_decimal` sqlx feature was off).
+
 ## [0.1.0-rc.1] - 2026-07-29
 
 Initial Rust rewrite of the [Bürokratt Resql](https://github.com/buerokratt/Resql)

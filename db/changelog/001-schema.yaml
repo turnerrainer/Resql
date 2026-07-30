@@ -1,0 +1,142 @@
+databaseChangeLog:
+  - changeSet:
+      id: 001-users-table
+      author: rainer
+      changes:
+        - createTable:
+            tableName: users
+            columns:
+              - column:
+                  name: id
+                  type: BIGSERIAL
+                  constraints:
+                    primaryKey: true
+                    nullable: false
+              - column:
+                  name: login
+                  type: TEXT
+                  constraints:
+                    nullable: false
+                    unique: true
+              - column:
+                  name: email
+                  type: TEXT
+              - column:
+                  name: status
+                  type: TEXT
+                  defaultValue: active
+                  constraints:
+                    nullable: false
+              - column:
+                  name: created_at
+                  type: TIMESTAMP WITH TIME ZONE
+                  defaultValueComputed: NOW()
+                  constraints:
+                    nullable: false
+
+  - changeSet:
+      id: 002-audit-log-table
+      author: rainer
+      changes:
+        - createTable:
+            tableName: audit_log
+            columns:
+              - column:
+                  name: id
+                  type: BIGSERIAL
+                  constraints:
+                    primaryKey: true
+                    nullable: false
+              - column:
+                  name: actor
+                  type: TEXT
+                  constraints:
+                    nullable: false
+              - column:
+                  name: action
+                  type: TEXT
+                  constraints:
+                    nullable: false
+              - column:
+                  name: at
+                  type: TIMESTAMP WITH TIME ZONE
+                  defaultValueComputed: NOW()
+                  constraints:
+                    nullable: false
+
+  - changeSet:
+      id: 003-orders-table
+      author: rainer
+      changes:
+        - createTable:
+            tableName: orders
+            columns:
+              - column:
+                  name: id
+                  type: BIGSERIAL
+                  constraints:
+                    primaryKey: true
+                    nullable: false
+              - column:
+                  name: user_id
+                  type: BIGINT
+                  constraints:
+                    nullable: false
+                    foreignKeyName: fk_orders_user
+                    references: users(id)
+              - column:
+                  name: total_cents
+                  type: INTEGER
+                  constraints:
+                    nullable: false
+              - column:
+                  name: items
+                  type: JSONB
+                  constraints:
+                    nullable: false
+
+  - changeSet:
+      id: 004-flags-table
+      author: rainer
+      changes:
+        - createTable:
+            tableName: flags
+            columns:
+              - column:
+                  name: name
+                  type: TEXT
+                  constraints:
+                    primaryKey: true
+                    nullable: false
+              - column:
+                  name: enabled
+                  type: BOOLEAN
+                  constraints:
+                    nullable: false
+
+  - changeSet:
+      id: 005-daily-stats-table
+      author: rainer
+      changes:
+        - createTable:
+            tableName: daily_stats
+            columns:
+              - column:
+                  name: day
+                  type: DATE
+                  constraints:
+                    nullable: false
+              - column:
+                  name: region
+                  type: TEXT
+                  constraints:
+                    nullable: false
+              - column:
+                  name: revenue
+                  type: NUMERIC(12, 2)
+                  constraints:
+                    nullable: false
+        - addPrimaryKey:
+            tableName: daily_stats
+            columnNames: day, region
+            constraintName: pk_daily_stats

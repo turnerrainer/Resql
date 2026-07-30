@@ -21,6 +21,21 @@ jobs:
       matrix:
         os: [ubuntu-latest, ubuntu-24.04-arm]
     runs-on: ${{ matrix.os }}
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: cipw
+          POSTGRES_DB: resql_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U postgres"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
+    env:
+      TEST_POSTGRES_URL: "postgres://postgres:cipw@localhost:5432/resql_test"
     steps:
       - uses: actions/checkout@v4
 
@@ -40,6 +55,17 @@ jobs:
           key: ${{ runner.os }}-${{ runner.arch }}-cargo-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-${{ runner.arch }}-cargo-
+
+      - name: Apply schema + fixtures via Liquibase
+        run: |
+          docker run --rm --network host \
+            -v "${GITHUB_WORKSPACE}/db/changelog:/liquibase/changelog" \
+            liquibase/liquibase:4.29 \
+            --url=jdbc:postgresql://localhost:5432/resql_test \
+            --username=postgres --password=cipw \
+            --changeLogFile=changelog/master.yaml \
+            --contexts=test \
+            update
 
       - name: cargo fmt --check
         run: cargo fmt --all -- --check

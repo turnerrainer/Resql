@@ -276,11 +276,20 @@ fn pg_column_value(row: &PgRow, idx: usize, ty: &str) -> Value {
             return Value::Bool(v);
         }
     }
-    // Numeric types: prefer i64, else f64, else NUMERIC-as-string.
-    if matches!(
-        ty_upper.as_str(),
-        "INT2" | "SMALLINT" | "INT4" | "INT" | "INTEGER" | "INT8" | "BIGINT" | "OID"
-    ) {
+    // Integer types: sqlx decodes each PG width to its native Rust type
+    // (INT2→i16, INT4→i32, INT8→i64). Pick the right accessor per width;
+    // widening cast to i64 for the JSON representation.
+    if matches!(ty_upper.as_str(), "INT2" | "SMALLINT") {
+        if let Ok(Some(v)) = row.try_get::<Option<i16>, _>(idx) {
+            return Value::Number(i64::from(v).into());
+        }
+    }
+    if matches!(ty_upper.as_str(), "INT4" | "INT" | "INTEGER") {
+        if let Ok(Some(v)) = row.try_get::<Option<i32>, _>(idx) {
+            return Value::Number(i64::from(v).into());
+        }
+    }
+    if matches!(ty_upper.as_str(), "INT8" | "BIGINT" | "OID") {
         if let Ok(Some(v)) = row.try_get::<Option<i64>, _>(idx) {
             return Value::Number(v.into());
         }
@@ -295,9 +304,11 @@ fn pg_column_value(row: &PgRow, idx: usize, ty: &str) -> Value {
                 .unwrap_or(Value::Null);
         }
     }
+    // NUMERIC → serialised as string so callers don't silently truncate via
+    // f64. Requires the `rust_decimal` sqlx feature.
     if matches!(ty_upper.as_str(), "NUMERIC" | "DECIMAL") {
-        if let Ok(Some(v)) = row.try_get::<Option<String>, _>(idx) {
-            return Value::String(v);
+        if let Ok(Some(v)) = row.try_get::<Option<sqlx::types::Decimal>, _>(idx) {
+            return Value::String(v.to_string());
         }
     }
     // JSON / JSONB

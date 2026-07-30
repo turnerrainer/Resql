@@ -17,6 +17,7 @@ use resql_on_rust::health::StartTime;
 use resql_on_rust::loader;
 use resql_on_rust::server::{self, AppState};
 use serde_json::Value;
+use sqlx::postgres::PgPoolOptions;
 use sqlx::sqlite::SqlitePoolOptions;
 use tempfile::TempDir;
 
@@ -30,6 +31,9 @@ pub struct TestAppBuilder {
     files: Vec<(String, String)>,
     seed_sql: Vec<String>,
     datasource_names: Vec<String>,
+    /// Extra datasources hitting a real Postgres URL. Populated by
+    /// `with_postgres_datasource(name, url)`. Coexists with SQLite ones.
+    pg_datasources: Vec<(String, String)>,
     project_map: Vec<(String, String)>,
     allow_header: bool,
     max_body: usize,
@@ -41,10 +45,24 @@ impl TestAppBuilder {
             files: Vec::new(),
             seed_sql: Vec::new(),
             datasource_names: vec!["demo".into()],
+            pg_datasources: Vec::new(),
             project_map: Vec::new(),
             allow_header: true,
             max_body: 1_048_576,
         }
+    }
+
+    /// Add a Postgres-backed datasource by URL. Coexists with any
+    /// SQLite datasources set up via `with_datasources`.
+    pub fn with_postgres_datasource(mut self, name: &str, url: &str) -> Self {
+        self.pg_datasources.push((name.into(), url.into()));
+        self
+    }
+
+    /// Skip SQLite entirely. Use when the test is Postgres-only.
+    pub fn no_sqlite_datasources(mut self) -> Self {
+        self.datasource_names.clear();
+        self
     }
 
     pub fn with_sql(mut self, rel: &str, body: &str) -> Self {
@@ -109,6 +127,24 @@ impl TestAppBuilder {
                 password_env: "".into(),
                 max_connections: 1,
                 acquire_timeout_seconds: 1,
+            });
+        }
+        for (name, url) in &self.pg_datasources {
+            let pool_inner = PgPoolOptions::new()
+                .max_connections(4)
+                .connect(url)
+                .await
+                .unwrap_or_else(|e| {
+                    panic!("cannot connect Postgres datasource '{name}' at {url}: {e}")
+                });
+            registry.insert(name.clone(), Pool::Postgres(pool_inner));
+            cfg_datasources.push(DatasourceConfig {
+                name: name.clone(),
+                url: url.clone(),
+                username: "".into(),
+                password_env: "".into(),
+                max_connections: 4,
+                acquire_timeout_seconds: 5,
             });
         }
 
