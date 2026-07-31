@@ -108,7 +108,7 @@ jobs:
             type=image,rewrite-timestamp=true
 
       - name: Trivy scan (block HIGH/CRITICAL)
-        uses: aquasecurity/trivy-action@0.24.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: ${{ env.GHCR_IMAGE }}@${{ steps.build.outputs.digest }}
           exit-code: "1"
