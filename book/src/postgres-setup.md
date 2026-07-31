@@ -1,6 +1,6 @@
 # Postgres + Liquibase setup
 
-Resql-on-Rust does **not** manage schema. Schema and migrations are
+Resql does **not** manage schema. Schema and migrations are
 Liquibase's job; Resql just executes SQL that assumes the schema is
 already there. This chapter shows the pattern for local test runs and
 for production deployments.

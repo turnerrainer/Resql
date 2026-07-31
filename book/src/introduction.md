@@ -1,6 +1,6 @@
 # Introduction
 
-**Resql-on-Rust** turns a directory of `.sql` files into a REST API. There
+**Resql** turns a directory of `.sql` files into a REST API. There
 is no controller code to write. Drop a file at
 `sql/<project>/<GET|POST>/<name>.sql`; the file becomes an HTTP endpoint
 at `<METHOD> /<project>/<name>` on next startup. JSON payload keys bind
@@ -9,8 +9,8 @@ returned as a JSON array.
 
 **Version:** 0.1.0-alpha.1
 **License:** [Apache-2.0](https://www.apache.org/licenses/LICENSE-2.0)
-**Container:** `docker.io/turnerrainer/resql-on-rust:0.1.0-alpha.1`
-**Source:** [github.com/turnerrainer/Resql-on-Rust](https://github.com/turnerrainer/Resql-on-Rust)
+**Container:** `docker.io/turnerrainer/resql:0.1.0-alpha.1`
+**Source:** [github.com/turnerrainer/Resql](https://github.com/turnerrainer/Resql)
 
 ## One-command demo
 
@@ -18,7 +18,7 @@ The published image ships with a working SQLite-backed multi-database
 demo: two datasources (`users` and `audit`) wired to two URL projects.
 
 ```bash
-docker run --rm -p 8080:8080 turnerrainer/resql-on-rust:0.1.0-alpha.1
+docker run --rm -p 8080:8080 turnerrainer/resql:0.1.0-alpha.1
 
 # Hits the `users` datasource:
 curl "http://localhost:8080/users/hello?name=world"
@@ -31,15 +31,15 @@ curl "http://localhost:8080/audit/tail?n=42"
 
 ## What it replaces
 
-Resql-on-Rust is a Rust rewrite of the original
+Resql is a Rust rewrite of the original
 [Bürokratt Resql](https://github.com/buerokratt/Resql) Spring Boot service.
 It keeps the same public shape (SQL file → endpoint, `:named` binding,
 snake→camel result columns, JSON array response) and fixes a shortlist
-of pain points captured in [docs/DESIGN.md](https://github.com/turnerrainer/Resql-on-Rust/blob/main/docs/DESIGN.md).
+of pain points captured in [docs/DESIGN.md](https://github.com/turnerrainer/Resql/blob/main/docs/DESIGN.md).
 
 Notable behavioural improvements over the Spring Boot original:
 
-| Behaviour | JVM Resql | Resql-on-Rust |
+| Behaviour | JVM Resql | Resql |
 |---|---|---|
 | Datasource routed by URL project | ❌ hardcoded to a single datasource name (multi-database impossible without patching source) | ✅ project name → datasource, plus `X-Datasource` header + `project_datasource_map` |
 | Missing config → startup fails loudly | Partial | Full: refuses to boot on any misconfigured datasource |

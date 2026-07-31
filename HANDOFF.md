@@ -8,7 +8,7 @@
 Next contributor (human or Claude) must:
 
 1. Read [`../DEV-REQUIREMENTS.md`](../DEV-REQUIREMENTS.md) front-to-back before touching anything. That's the authoritative ruleset for all Buerostack Rust projects.
-2. Read this file for Resql-on-Rust-specific state.
+2. Read this file for Resql-specific state.
 3. Run the verification set (below); every command exits 0.
 
 ## What this repo IS today
@@ -38,7 +38,7 @@ Fast path (SQLite integration only, no external services):
 ```bash
 cargo fmt --check
 cargo clippy --all-targets --locked -- -D warnings
-cargo build --release --locked --bin resql-on-rust
+cargo build --release --locked --bin resql
 cargo test --no-fail-fast --locked
 cargo audit --deny warnings         # requires: cargo install cargo-audit
 cargo deny check all                # requires: cargo install cargo-deny
@@ -58,8 +58,8 @@ path — Postgres tests skip cleanly without `TEST_POSTGRES_URL`.
 Live smoke:
 
 ```bash
-docker build -t resql-on-rust:local .
-docker run -d --name resql-smoke -p 18080:8080 resql-on-rust:local
+docker build -t resql:local .
+docker run -d --name resql-smoke -p 18080:8080 resql:local
 sleep 2
 curl http://localhost:18080/health
 curl http://localhost:18080/datasources    # two datasources listed
@@ -77,13 +77,13 @@ Two one-time repository setups, then all future publishes are automatic.
 ### One-time GitHub setup
 
 ```bash
-gh repo create turnerrainer/Resql-on-Rust --public \
+gh repo create turnerrainer/Resql --public \
     --description "SQL-files-as-REST-endpoints microservice (Rust)"
 
-gh api repos/turnerrainer/Resql-on-Rust/pages \
+gh api repos/turnerrainer/Resql/pages \
     -X POST -f 'build_type=workflow'
 
-gh api repos/turnerrainer/Resql-on-Rust/actions/permissions/workflow \
+gh api repos/turnerrainer/Resql/actions/permissions/workflow \
     -X PUT \
     -F 'default_workflow_permissions=write' \
     -F 'can_approve_pull_request_reviews=false'
@@ -91,13 +91,13 @@ gh api repos/turnerrainer/Resql-on-Rust/actions/permissions/workflow \
 
 ### One-time Docker Hub setup
 
-1. Create the repo: https://hub.docker.com/repositories/turnerrainer → **Create repository** → name `resql-on-rust` → **Public**.
-2. Create a PAT: https://app.docker.com/settings/personal-access-tokens → **Generate new token** → **Restricted access** to `resql-on-rust` only → **Read + Write + Delete**. Copy the token immediately (only shown once).
+1. Create the repo: https://hub.docker.com/repositories/turnerrainer → **Create repository** → name `resql` → **Public**.
+2. Create a PAT: https://app.docker.com/settings/personal-access-tokens → **Generate new token** → **Restricted access** to `resql` only → **Read + Write + Delete**. Copy the token immediately (only shown once).
 3. Set the two secrets:
 
 ```bash
-gh secret set DOCKERHUB_USERNAME --repo turnerrainer/Resql-on-Rust --body 'turnerrainer'
-echo -n '<paste-token-here>' | gh secret set DOCKERHUB_TOKEN --repo turnerrainer/Resql-on-Rust
+gh secret set DOCKERHUB_USERNAME --repo turnerrainer/Resql --body 'turnerrainer'
+echo -n '<paste-token-here>' | gh secret set DOCKERHUB_TOKEN --repo turnerrainer/Resql
 ```
 
 (Second command reads from stdin so the token does not appear in `ps` output or shell history.)
@@ -105,8 +105,8 @@ echo -n '<paste-token-here>' | gh secret set DOCKERHUB_TOKEN --repo turnerrainer
 ### Push the branch and tag
 
 ```bash
-cd /home/rainer/Desktop/Buerostack/Resql-on-Rust
-git remote add origin git@github.com:turnerrainer/Resql-on-Rust.git   # if not already
+cd /home/rainer/Desktop/Buerostack/Resql-on-Rust   # on-disk dir name is legacy; project name is Resql
+git remote add origin git@github.com:turnerrainer/Resql.git   # if not already
 git push -u origin dev
 git push origin v0.1.0-alpha.1
 ```
@@ -114,23 +114,23 @@ git push origin v0.1.0-alpha.1
 The `publish.yml` workflow triggers on the tag push. Watch it:
 
 ```bash
-gh run watch --repo turnerrainer/Resql-on-Rust
+gh run watch --repo turnerrainer/Resql
 ```
 
 ### One-time GHCR link (after first publish)
 
 Personal-namespace packages need an explicit repo link before `GITHUB_TOKEN` can push subsequent versions:
 
-- Open https://github.com/users/turnerrainer/packages/container/resql-on-rust/settings
+- Open https://github.com/users/turnerrainer/packages/container/resql/settings
 - **Change visibility** → Public
-- **Manage Actions access** → **Add repository** → `turnerrainer/Resql-on-Rust` → **Write**
+- **Manage Actions access** → **Add repository** → `turnerrainer/Resql` → **Write**
 
 ### Verify the publish
 
 ```bash
 docker logout && docker system prune -f
-docker pull docker.io/turnerrainer/resql-on-rust:0.1.0-alpha.1
-docker run --rm -p 18080:8080 -d --name resql-live docker.io/turnerrainer/resql-on-rust:0.1.0-alpha.1
+docker pull docker.io/turnerrainer/resql:0.1.0-alpha.1
+docker run --rm -p 18080:8080 -d --name resql-live docker.io/turnerrainer/resql:0.1.0-alpha.1
 sleep 2
 curl http://localhost:18080/health
 docker stop resql-live
@@ -178,7 +178,7 @@ Open backlog:
 | Cross-project ruleset (authoritative) | [`../DEV-REQUIREMENTS.md`](../DEV-REQUIREMENTS.md) |
 | Domain design (Resql-specific) | [`./docs/DESIGN.md`](./docs/DESIGN.md) |
 | Project-specific standards addendum | [`./STANDARDS.md`](./STANDARDS.md) |
-| Public docs | https://turnerrainer.github.io/Resql-on-Rust/ |
+| Public docs | https://turnerrainer.github.io/Resql/ |
 | Full change history | [`./CHANGELOG.md`](./CHANGELOG.md) |
 | Private security disclosure | [`./SECURITY.md`](./SECURITY.md) |
 | CI workflows | [`.github/workflows/`](./.github/workflows/) |

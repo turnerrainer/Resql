@@ -1,4 +1,4 @@
-# Resql-on-Rust default configuration
+# Resql default configuration
 #
 # Every field shown here is documented in book/src/configuration.md. Env
 # vars follow the pattern RESQL__<UPPERCASE_KEY> with `__` for nesting.
@@ -60,6 +60,6 @@ cors:
 
 logging:
   # tracing_subscriber EnvFilter directive. Overridable via RESQL_LOG env.
-  level: "info,resql_on_rust=debug"
+  level: "info,resql=debug"
   # "text" (default) or "json".
   format: "text"

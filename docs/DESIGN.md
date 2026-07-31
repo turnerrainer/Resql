@@ -1,10 +1,10 @@
-# DESIGN — Resql-on-Rust
+# DESIGN — Resql
 
 **Status:** Landed with 0.1.0-alpha.1.
 **Owner:** Rainer Türner.
 **Superseded parts:** None yet.
 
-This is the domain-design doc: what Resql-on-Rust must do, why, and the
+This is the domain-design doc: what Resql must do, why, and the
 interfaces we are committed to. Implementation choices are described
 just enough to make the "why" of the design legible; consult the source
 under `src/` for the mechanical details.
@@ -114,7 +114,7 @@ The 400-for-everything shape is inherited from JVM Resql for compatibility. Cons
 
 ## 7. Fixed vs the JVM original
 
-| Behaviour | JVM Resql | Resql-on-Rust |
+| Behaviour | JVM Resql | Resql |
 |---|---|---|
 | Datasource by URL project | ❌ hardcoded to a single datasource name; multi-database impossible without a source patch | ✅ project → datasource, header override, config map |
 | Config validation | Partial (some datasources default silently) | Full: refuses to boot on any misconfig |

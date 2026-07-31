@@ -11,7 +11,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
-RUN cargo build --release --locked --bin resql-on-rust
+RUN cargo build --release --locked --bin resql
 
 # ─────────────────────────────────────────────────────────────
 # Runtime stage — minimal Debian, non-root, tini, self-contained.
@@ -22,7 +22,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libssl3 ca-certificates tini curl \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /build/target/release/resql-on-rust /app/resql-on-rust
+COPY --from=builder /build/target/release/resql /app/resql
 
 # Ship a working multi-database demo out of the box: two SQLite datasources
 # (`users` and `audit`) wired to two URL projects. Operators mount their
@@ -39,4 +39,4 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD curl -fsS http://127.0.0.1:8080/health || exit 1
 
 ENTRYPOINT ["/usr/bin/tini", "--"]
-CMD ["/app/resql-on-rust"]
+CMD ["/app/resql"]

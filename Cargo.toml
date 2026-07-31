@@ -1,19 +1,19 @@
 [package]
-name = "resql-on-rust"
+name = "resql"
 version = "0.1.0-alpha.1"
 edition = "2021"
 rust-version = "1.88"
 license = "Apache-2.0"
 description = "SQL-files-as-REST-endpoints microservice (Rust rewrite of Buerostack Resql)"
-repository = "https://github.com/turnerrainer/Resql-on-Rust"
+repository = "https://github.com/turnerrainer/Resql"
 readme = "README.md"
 
 [[bin]]
-name = "resql-on-rust"
+name = "resql"
 path = "src/main.rs"
 
 [lib]
-name = "resql_on_rust"
+name = "resql"
 path = "src/lib.rs"
 
 [dependencies]

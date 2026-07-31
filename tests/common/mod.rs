@@ -11,11 +11,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use axum::Router;
-use resql_on_rust::config::{Config, DatasourceConfig};
-use resql_on_rust::db::{DatasourceRegistry, Pool};
-use resql_on_rust::health::StartTime;
-use resql_on_rust::loader;
-use resql_on_rust::server::{self, AppState};
+use resql::config::{Config, DatasourceConfig};
+use resql::db::{DatasourceRegistry, Pool};
+use resql::health::StartTime;
+use resql::loader;
+use resql::server::{self, AppState};
 use serde_json::Value;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::sqlite::SqlitePoolOptions;
@@ -154,7 +154,7 @@ impl TestAppBuilder {
         }
 
         let config = Config {
-            server: resql_on_rust::config::ServerConfig {
+            server: resql::config::ServerConfig {
                 bind: "127.0.0.1:0".into(),
                 max_body_bytes: self.max_body,
                 request_timeout_seconds: 30,
@@ -163,8 +163,8 @@ impl TestAppBuilder {
             project_datasource_map: project_map,
             allow_datasource_header: self.allow_header,
             datasources: cfg_datasources,
-            cors: resql_on_rust::config::CorsConfig::default(),
-            logging: resql_on_rust::config::LoggingConfig::default(),
+            cors: resql::config::CorsConfig::default(),
+            logging: resql::config::LoggingConfig::default(),
         };
 
         let state = AppState {

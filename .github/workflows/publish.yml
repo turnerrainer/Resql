@@ -21,8 +21,8 @@ permissions:
   id-token: write   # cosign keyless via GHA OIDC
 
 env:
-  DOCKER_HUB_IMAGE: docker.io/turnerrainer/resql-on-rust
-  GHCR_IMAGE: ghcr.io/turnerrainer/resql-on-rust
+  DOCKER_HUB_IMAGE: docker.io/turnerrainer/resql
+  GHCR_IMAGE: ghcr.io/turnerrainer/resql
 
 jobs:
   publish:

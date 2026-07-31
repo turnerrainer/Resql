@@ -6,12 +6,12 @@ use tokio::net::TcpListener;
 use tokio::signal;
 use tracing::info;
 
-use resql_on_rust::config::Config;
-use resql_on_rust::server;
+use resql::config::Config;
+use resql::server;
 
 #[derive(Debug, Parser)]
 #[command(
-    name = "resql-on-rust",
+    name = "resql",
     version,
     about = "SQL-files-as-REST-endpoints microservice"
 )]
@@ -39,7 +39,7 @@ async fn main() -> Result<()> {
         bind = %cfg.server.bind,
         sql_dir = %cfg.sql_dir.display(),
         datasources = cfg.datasources.len(),
-        "starting Resql-on-Rust"
+        "starting Resql"
     );
 
     let state = server::init(cfg.clone())

@@ -1525,7 +1525,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "resql-on-rust"
+name = "resql"
 version = "0.1.0-alpha.1"
 dependencies = [
  "anyhow",

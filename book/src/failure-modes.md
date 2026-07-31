@@ -19,7 +19,7 @@ Every error response is a JSON object of shape:
 | **500** | Panic or unexpected internal error. Reported to logs; body is minimal. |
 
 Note: JVM Resql returned **400 for every error class**, including
-"query not found." Resql-on-Rust keeps that behaviour for compatibility;
+"query not found." Resql keeps that behaviour for compatibility;
 only `413` (body too large) and `500` (unhandled internal) sit outside.
 
 ## Error catalog
@@ -64,8 +64,8 @@ does **not** attempt to run in a degraded state.
 Turn logging up with:
 
 ```bash
-RESQL_LOG="debug,resql_on_rust=trace,sqlx=debug" \
-  ./resql-on-rust --config resql.yaml
+RESQL_LOG="debug,resql=trace,sqlx=debug" \
+  ./resql --config resql.yaml
 ```
 
 `sqlx=debug` prints every SQL statement and bound parameter — helpful

@@ -1,4 +1,4 @@
-# Resql-on-Rust developer make targets.
+# Resql developer make targets.
 #
 # The Rust build itself never touches these — they're conveniences for
 # the Postgres + Liquibase story documented in book/src/postgres-setup.md.

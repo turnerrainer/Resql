@@ -74,7 +74,7 @@ jobs:
         run: cargo clippy --all-targets --locked -- -D warnings
 
       - name: cargo build --release
-        run: cargo build --release --locked --bin resql-on-rust
+        run: cargo build --release --locked --bin resql
 
       - name: cargo test --no-fail-fast
         run: cargo test --no-fail-fast --locked

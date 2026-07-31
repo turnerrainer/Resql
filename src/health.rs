@@ -6,7 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// tag and the runtime response.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-pub const APP_NAME: &str = "resql-on-rust";
+pub const APP_NAME: &str = "resql";
 
 #[derive(Debug, Clone, Copy)]
 pub struct StartTime(pub u64);
@@ -59,7 +59,7 @@ mod tests {
     #[test]
     fn build_response_has_all_fields() {
         let r = build(StartTime(1000));
-        assert_eq!(r.app_name, "resql-on-rust");
+        assert_eq!(r.app_name, "resql");
         assert_eq!(r.app_start_time, 1000);
         assert_eq!(r.status, "UP");
         assert!(r.server_time >= 1000);

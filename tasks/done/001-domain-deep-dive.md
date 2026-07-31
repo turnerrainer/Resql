@@ -2,7 +2,7 @@
 
 ## Filed
 2026-07-29 — First task after repo scaffold; needed to capture the public
-interface Resql-on-Rust must preserve before writing any code.
+interface Resql must preserve before writing any code.
 
 ## Landed
 2026-07-29 — commit `<pending>`. Produced [`../../docs/DESIGN.md`](../../docs/DESIGN.md).

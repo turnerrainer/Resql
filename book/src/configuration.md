@@ -1,6 +1,6 @@
 # Configuration
 
-Resql-on-Rust reads a single YAML file at startup. The path is set with
+Resql reads a single YAML file at startup. The path is set with
 `--config <path>` or the `RESQL_CONFIG` env var (default `/app/resql.yaml`
 inside the container).
 
@@ -71,7 +71,7 @@ locked-down deployments where operators pick datasources centrally.
 
 | Field | Type | Default | Purpose |
 |---|---|---|---|
-| `level` | string | `info,resql_on_rust=debug` | `tracing_subscriber` EnvFilter directive. |
+| `level` | string | `info,resql=debug` | `tracing_subscriber` EnvFilter directive. |
 | `format` | string | `text` | `text` or `json`. |
 
 The `RESQL_LOG` env var overrides `level` at runtime without touching
@@ -115,6 +115,6 @@ cors:
   allowed_origins: "https://ops.internal, https://console.internal"
 
 logging:
-  level: "info,resql_on_rust=debug,sqlx=warn"
+  level: "info,resql=debug,sqlx=warn"
   format: "json"
 ```

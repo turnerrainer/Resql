@@ -7,7 +7,7 @@ async fn health_returns_up() {
     let (status, body) = app.request("GET", "/health", None, &[]).await;
     assert_eq!(status, 200);
     assert_eq!(body["status"], "UP");
-    assert_eq!(body["appName"], "resql-on-rust");
+    assert_eq!(body["appName"], "resql");
     assert!(body["version"].as_str().unwrap().starts_with('0'));
     assert!(body["appStartTime"].as_u64().unwrap() > 0);
     assert!(body["serverTime"].as_u64().unwrap() > 0);

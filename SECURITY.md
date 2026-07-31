@@ -6,7 +6,7 @@ Please report suspected vulnerabilities privately, **not** via a public
 GitHub issue.
 
 - **Email:** rainer.turner@gmail.com
-- **Subject line:** `Resql-on-Rust security: <one-line summary>`
+- **Subject line:** `Resql security: <one-line summary>`
 
 If you believe the issue is time-sensitive (active exploitation, credential
 compromise), say so in the subject line and I will prioritise.

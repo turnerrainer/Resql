@@ -8,7 +8,7 @@
 ignore = [
     # RUSTSEC-2023-0071 — Marvin timing side-channel in the `rsa` crate.
     # `rsa` is pulled into Cargo.lock via sqlx-mysql (optional dep of
-    # sqlx-macros-core), but Resql-on-Rust does NOT enable the mysql
+    # sqlx-macros-core), but Resql does NOT enable the mysql
     # backend and sqlx-mysql is not compiled into the released binary
     # (verified via `cargo build --release` — only sqlx-core, sqlx-postgres,
     # sqlx-sqlite show up). No runtime attack surface. Re-audit if the

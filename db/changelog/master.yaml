@@ -1,6 +1,6 @@
-# Liquibase master changelog for Resql-on-Rust.
+# Liquibase master changelog for Resql.
 #
-# This file is applied OUT OF BAND — Resql-on-Rust itself never touches
+# This file is applied OUT OF BAND — Resql itself never touches
 # schema. Point Liquibase at your database as part of your deployment
 # pipeline (init container, one-shot job, or the Makefile targets in
 # this repo for local test runs).

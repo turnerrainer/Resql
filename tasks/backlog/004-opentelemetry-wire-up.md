@@ -25,7 +25,7 @@ Config:
 ```yaml
 telemetry:
   otlp_endpoint: "http://otel-collector.internal:4317"
-  service_name: "resql-on-rust"
+  service_name: "resql"
   sample_ratio: 0.1
 ```
 

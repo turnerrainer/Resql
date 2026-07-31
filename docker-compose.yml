@@ -1,7 +1,7 @@
 services:
   resql:
-    image: turnerrainer/resql-on-rust:0.1.0-alpha.1
-    container_name: resql-on-rust
+    image: turnerrainer/resql:0.1.0-alpha.1
+    container_name: resql
     restart: unless-stopped
     ports:
       - "8080:8080"
@@ -9,7 +9,7 @@ services:
     # with a self-contained SQLite demo (two datasources: `users` + `audit`)
     # so `docker compose up` works with no further setup.
     # environment:
-    #   RESQL_LOG: "info,resql_on_rust=debug"
+    #   RESQL_LOG: "info,resql=debug"
     # volumes:
     #   - ./resql.yaml:/app/resql.yaml:ro
     #   - ./sql:/app/sql:ro

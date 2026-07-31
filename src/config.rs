@@ -113,7 +113,7 @@ fn default_cors() -> String {
     "*".into()
 }
 fn default_log_level() -> String {
-    "info,resql_on_rust=debug".into()
+    "info,resql=debug".into()
 }
 fn default_log_format() -> String {
     "text".into()
