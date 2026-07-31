@@ -20,7 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Postgres INT4 columns now decode correctly (previously fell through to `null` because the extractor only tried `i64`; sqlx-postgres decodes INT4 as `i32`). Surfaced by the new Postgres suite — exactly why it exists.
 - Postgres NUMERIC columns preserve full precision as a JSON string (previously `null` because the required `rust_decimal` sqlx feature was off).
 
-## [0.1.0-rc.1] - 2026-07-29
+## [0.1.0-alpha.1] - 2026-07-29
 
 Initial Rust rewrite of the [Bürokratt Resql](https://github.com/buerokratt/Resql)
 Spring Boot service. Interface-compatible with the original for the SQL-file-to-endpoint,
@@ -59,5 +59,5 @@ Spring Boot service. Interface-compatible with the original for the SQL-file-to-
 - Container image signed with cosign keyless via GHA OIDC.
 - Trivy HIGH/CRITICAL scan gates image signing.
 
-[Unreleased]: https://github.com/turnerrainer/Resql-on-Rust/compare/v0.1.0-rc.1...HEAD
-[0.1.0-rc.1]: https://github.com/turnerrainer/Resql-on-Rust/releases/tag/v0.1.0-rc.1
+[Unreleased]: https://github.com/turnerrainer/Resql-on-Rust/compare/v0.1.0-alpha.1...HEAD
+[0.1.0-alpha.1]: https://github.com/turnerrainer/Resql-on-Rust/releases/tag/v0.1.0-alpha.1

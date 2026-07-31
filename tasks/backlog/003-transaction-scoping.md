@@ -10,6 +10,13 @@ Medium. Blocks nothing today but is an obvious enhancement — batch
 callers that mean "N inserts as one atomic unit" today have to hand-roll
 a wrapping SQL file with `BEGIN; ...; COMMIT;`.
 
+**Note (2026-07-30):** Task 007 (High) supersedes the batch-atomicity
+part of this task by making `/batch` transactional by default. The
+per-file `@transactional` marker described below is still open scope
+for single-shot POST endpoints that need transactional semantics; if
+that turns out to have no real consumer once 007 lands, close this
+task as `Superseded: 007`.
+
 ## Motivation
 Batch endpoint currently loops query::execute; failure in the third
 of ten statements leaves the first two committed. A caller wanting

@@ -2,7 +2,7 @@
 
 **Written:** 2026-07-29 (Postgres/Liquibase addendum 2026-07-30)
 **Last verified green (local):** 2026-07-30 — cargo test 93/0/0 with `TEST_POSTGRES_URL` set (49 unit + 44 integration incl. 16 Postgres); fmt + clippy -D warnings clean; cargo audit + deny clean; mdbook + linkcheck clean; docker build + smoke pass on the multi-DB demo.
-**Branch:** `dev` — ready to tag `v0.1.0-rc.1`.
+**Branch:** `dev` — ready to tag `v0.1.0-alpha.1`.
 **Release status:** Local artifacts complete; the tag push + Docker Hub + GHCR publish is the operator step (§9 in `../DEV-REQUIREMENTS.md`).
 
 Next contributor (human or Claude) must:
@@ -108,7 +108,7 @@ echo -n '<paste-token-here>' | gh secret set DOCKERHUB_TOKEN --repo turnerrainer
 cd /home/rainer/Desktop/Buerostack/Resql-on-Rust
 git remote add origin git@github.com:turnerrainer/Resql-on-Rust.git   # if not already
 git push -u origin dev
-git push origin v0.1.0-rc.1
+git push origin v0.1.0-alpha.1
 ```
 
 The `publish.yml` workflow triggers on the tag push. Watch it:
@@ -129,8 +129,8 @@ Personal-namespace packages need an explicit repo link before `GITHUB_TOKEN` can
 
 ```bash
 docker logout && docker system prune -f
-docker pull docker.io/turnerrainer/resql-on-rust:0.1.0-rc.1
-docker run --rm -p 18080:8080 -d --name resql-live docker.io/turnerrainer/resql-on-rust:0.1.0-rc.1
+docker pull docker.io/turnerrainer/resql-on-rust:0.1.0-alpha.1
+docker run --rm -p 18080:8080 -d --name resql-live docker.io/turnerrainer/resql-on-rust:0.1.0-alpha.1
 sleep 2
 curl http://localhost:18080/health
 docker stop resql-live
@@ -164,11 +164,12 @@ Landed (see [CHANGELOG.md](./CHANGELOG.md)):
 
 Open backlog:
 
-| Task | Location | Notes |
-|---|---|---|
-| 003 | `tasks/backlog/003-transaction-scoping.md` | Optional transaction wrapper for POST endpoints |
-| 004 | `tasks/backlog/004-opentelemetry-wire-up.md` | Actually export OTLP traces (currently no OTel deps) |
-| 005 | `tasks/backlog/005-mysql-driver-optional.md` | Consider MySQL — needs STANDARDS §"driver support" review |
+| Task | Sev | Location | Notes |
+|---|---|---|---|
+| **007** | **High** | `tasks/backlog/007-atomic-batch-insert.md` | Make `/batch` atomic + one round-trip + native array binding; supersedes 003's batch part |
+| 003 | Med | `tasks/backlog/003-transaction-scoping.md` | Per-file `@transactional` marker for single-shot POSTs (see note re: 007) |
+| 004 | Med | `tasks/backlog/004-opentelemetry-wire-up.md` | Actually export OTLP traces (currently no OTel deps) |
+| 005 | Low | `tasks/backlog/005-mysql-driver-optional.md` | Consider MySQL — needs STANDARDS §"driver support" review |
 
 ## Where to look for more detail
 

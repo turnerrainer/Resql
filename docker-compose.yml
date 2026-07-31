@@ -1,6 +1,6 @@
 services:
   resql:
-    image: turnerrainer/resql-on-rust:0.1.0-rc.1
+    image: turnerrainer/resql-on-rust:0.1.0-alpha.1
     container_name: resql-on-rust
     restart: unless-stopped
     ports:

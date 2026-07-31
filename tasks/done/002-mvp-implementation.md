@@ -10,7 +10,7 @@ Dockerfile + docker-compose. Verified: 77 tests passing (49 unit + 28
 integration), fmt + clippy -D warnings clean, mdbook build clean.
 
 ## Severity
-High. Ships v0.1.0-rc.1.
+High. Ships v0.1.0-alpha.1.
 
 ## Motivation
 DESIGN doc is written; time to build against it. Everything downstream
