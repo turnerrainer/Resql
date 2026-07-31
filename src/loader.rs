@@ -40,7 +40,7 @@ impl HttpMethod {
 
 /// Lookup key normalisation: lowercase, no trailing slash.
 fn normalise(project: &str, path: &str) -> String {
-    format!("{}/{}", project, path).to_ascii_lowercase()
+    format!("{project}/{path}").to_ascii_lowercase()
 }
 
 /// In-memory index of SavedQuery keyed by (method, project, path).

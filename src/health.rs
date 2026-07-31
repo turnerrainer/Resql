@@ -52,7 +52,6 @@ mod tests {
 
     #[test]
     fn version_is_a_semver_string() {
-        assert!(!VERSION.is_empty());
         assert!(VERSION.chars().next().unwrap().is_ascii_digit());
     }
 
