@@ -118,19 +118,24 @@ jobs:
       - name: Smoke test both arches
         run: |
           set -euo pipefail
+          IMAGE="${{ env.GHCR_IMAGE }}@${{ steps.build.outputs.digest }}"
           for arch in amd64 arm64; do
-            docker rmi "${{ env.GHCR_IMAGE }}:${{ steps.tag.outputs.tag == '' && 'latest' || steps.tag.outputs.tag }}" 2>/dev/null || true
-            docker pull --platform "linux/${arch}" "${{ env.GHCR_IMAGE }}@${{ steps.build.outputs.digest }}"
-            cid=$(docker run -d --rm --platform "linux/${arch}" -p 18080:8080 \
-                    "${{ env.GHCR_IMAGE }}@${{ steps.build.outputs.digest }}")
+            # Force-remove any cached image at this digest so the platform pull re-fetches
+            # (Docker refuses to overwrite the same digest with a different platform).
+            docker image rm -f "$IMAGE" 2>/dev/null || true
+            docker pull --platform "linux/${arch}" "$IMAGE"
+            cid=$(docker run -d --rm --platform "linux/${arch}" -p 18080:8080 "$IMAGE")
+            healthy=0
             for _ in $(seq 1 30); do
               sleep 1
               if curl -fsS http://127.0.0.1:18080/health; then
                 echo " ← ${arch} healthy"
+                healthy=1
                 break
               fi
             done
             docker stop "$cid" >/dev/null
+            [ "$healthy" = "1" ] || { echo "${arch} never became healthy"; exit 1; }
           done
 
       - name: Install cosign
