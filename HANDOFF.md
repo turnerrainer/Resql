@@ -2,7 +2,7 @@
 
 **Written:** 2026-07-29 (Postgres/Liquibase addendum 2026-07-30)
 **Last verified green (local):** 2026-07-30 — cargo test 93/0/0 with `TEST_POSTGRES_URL` set (49 unit + 44 integration incl. 16 Postgres); fmt + clippy -D warnings clean; cargo audit + deny clean; mdbook + linkcheck clean; docker build + smoke pass on the multi-DB demo.
-**Branch:** `dev` — ready to tag `v0.1.0-alpha.1`.
+**Branch:** `dev` — tagged locally as `v0.1.0-alpha.1` (annotated); awaiting push.
 **Release status:** Local artifacts complete; the tag push + Docker Hub + GHCR publish is the operator step (§9 in `../DEV-REQUIREMENTS.md`).
 
 Next contributor (human or Claude) must:
