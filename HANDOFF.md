@@ -2,8 +2,12 @@
 
 **Written:** 2026-07-29 (Postgres/Liquibase addendum 2026-07-30)
 **Last verified green (local):** 2026-07-30 — cargo test 93/0/0 with `TEST_POSTGRES_URL` set (49 unit + 44 integration incl. 16 Postgres); fmt + clippy -D warnings clean; cargo audit + deny clean; mdbook + linkcheck clean; docker build + smoke pass on the multi-DB demo.
-**Branch:** `dev` — tagged locally as `v0.1.0-alpha.1` (annotated); awaiting push.
-**Release status:** Local artifacts complete; the tag push + Docker Hub + GHCR publish is the operator step (§9 in `../DEV-REQUIREMENTS.md`).
+**Branch:** `dev` (default). Tag `v0.1.0-alpha.1` published 2026-07-31.
+**Release status:** Published. Image at `docker.io/turnerrainer/resql:0.1.0-alpha.1` and `ghcr.io/turnerrainer/resql:0.1.0-alpha.1`, cosign-signed keyless via GHA OIDC. Docs at https://turnerrainer.github.io/Resql/. Health verified: `{"appName":"resql","version":"0.1.0-alpha.1","status":"UP"}`.
+
+**Pending operator follow-ups:**
+- **Rotate the Docker Hub PAT.** The one used for `DOCKERHUB_TOKEN` was pasted in the release chat and should be considered compromised. Generate a new PAT, then re-set the secret: `echo -n '<new-pat>' | gh secret set DOCKERHUB_TOKEN --repo turnerrainer/Resql`.
+- **GHCR one-time repo link** (only needed before the *next* release): open https://github.com/users/turnerrainer/packages/container/resql/settings → Change visibility → Public → Manage Actions access → Add repository → `turnerrainer/Resql` → Write. First publish worked because `GITHUB_TOKEN`'s package-write scope was sufficient; subsequent versions in the personal namespace need the explicit link.
 
 Next contributor (human or Claude) must:
 
