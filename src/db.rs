@@ -97,6 +97,7 @@ mod tests {
             url: "sqlite::memory:".into(),
             username: "".into(),
             password_env: "".into(),
+            password: None,
             max_connections: 1,
             acquire_timeout_seconds: 1,
         };
@@ -111,6 +112,7 @@ mod tests {
             url: "mysql://localhost/db".into(),
             username: "".into(),
             password_env: "".into(),
+            password: None,
             max_connections: 1,
             acquire_timeout_seconds: 1,
         };
@@ -125,6 +127,7 @@ mod tests {
             url: "sqlite::memory:".into(),
             username: "".into(),
             password_env: "".into(),
+            password: None,
             max_connections: 1,
             acquire_timeout_seconds: 1,
         };

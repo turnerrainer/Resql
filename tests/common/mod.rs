@@ -125,6 +125,7 @@ impl TestAppBuilder {
                 url: "sqlite::memory:".into(),
                 username: "".into(),
                 password_env: "".into(),
+                password: None,
                 max_connections: 1,
                 acquire_timeout_seconds: 1,
             });
@@ -143,6 +144,7 @@ impl TestAppBuilder {
                 url: url.clone(),
                 username: "".into(),
                 password_env: "".into(),
+                password: None,
                 max_connections: 4,
                 acquire_timeout_seconds: 5,
             });
@@ -162,9 +164,11 @@ impl TestAppBuilder {
             sql_dir: sql_root.clone(),
             project_datasource_map: project_map,
             allow_datasource_header: self.allow_header,
+            default_datasource: None,
             datasources: cfg_datasources,
             cors: resql::config::CorsConfig::default(),
             logging: resql::config::LoggingConfig::default(),
+            compat_diagnostics: Vec::new(),
         };
 
         let state = AppState {
