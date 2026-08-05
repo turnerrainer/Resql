@@ -137,7 +137,86 @@ curl -X POST http://localhost:8080/crm/users/find/batch \
 # [[{"id":1,"email":"alice@x"}], [{"id":2,"email":"bob@x"}]]
 ```
 
-If any single query in the batch fails (missing param, SQL error), the
-whole request fails with the same 400 shape as the equivalent non-batch
-call. There is no partial-success mode by design — batching is a
-performance-only shortcut, not a transactional grouping.
+**Atomicity guarantee (since v0.1.0-alpha.2):** the whole batch runs
+inside a single database transaction. Every iteration binds and
+executes through the same transaction; a failure on any iteration
+rolls the entire transaction back — no partial writes ever land. The
+response body on failure is the standard 400 shape as if the failing
+query had been sent on its own.
+
+```bash
+# If the 2nd iteration violates a UNIQUE constraint, iterations 1 AND 3
+# are rolled back too. A subsequent SELECT sees zero of these rows.
+curl -X POST http://localhost:8080/crm/users/create/batch \
+     -H "content-type: application/json" \
+     -d '{"queries":[{"login":"a"},{"login":"a"},{"login":"c"}]}'
+# → 400 {"error":"BadSqlGrammarException", "message":"..."}
+```
+
+Missing-parameter checks run against every parameter set BEFORE the
+transaction opens, so a batch that couldn't possibly succeed fails
+fast without any DB round-trips.
+
+Soft ceiling: batching 10⁴ rows in one request works fine, but the
+transaction holds row locks until commit. Consumers doing 10⁵+ row
+loads should split into multiple batches at the caller.
+
+## Native array parameters (Postgres)
+
+When a JSON parameter is an array of homogeneous scalars, it binds
+natively as a Postgres array (`text[]`, `int8[]`, `float8[]`, `bool[]`)
+so a single SQL statement using `unnest()` can process the whole batch
+in one round-trip:
+
+```sql
+-- sql/audit/POST/append-many.sql
+INSERT INTO audit_log (actor, action)
+SELECT unnest(:actors), unnest(:actions)
+RETURNING id;
+```
+
+```bash
+curl -X POST http://localhost:8080/audit/append-many \
+     -H "content-type: application/json" \
+     -d '{"actors":["alice","bob"],"actions":["created","updated"]}'
+# → 200 [{"id":42}, {"id":43}]   (one INSERT, two rows)
+```
+
+Rules:
+
+- Non-null elements must all be the same scalar kind. Nulls are
+  permitted anywhere and become SQL NULL elements.
+- Mixed kinds (`[1, "two", true]`), nested (`[[1,2],[3,4]]`), all-null,
+  and empty arrays fall back to JSONB binding — use
+  `jsonb_array_elements*` in your SQL to unpack.
+- Int + float mixed promotes to `float8[]`.
+- **SQLite has no native array type.** Arrays bind as a JSON string;
+  use `json_each()` to unpack:
+
+  ```sql
+  SELECT value AS actor FROM json_each(:actors);
+  ```
+
+## Per-file `@transactional` marker
+
+Add `-- @transactional` as the very first comment in a SQL file to
+have the endpoint's execution wrapped in a single database transaction
+(commit on success, rollback on any error). Batch endpoints are always
+transactional regardless — this marker is for single-shot POST
+endpoints whose SQL contains multiple statements or where the caller
+wants explicit rollback semantics on failure.
+
+```sql
+-- @transactional
+INSERT INTO audit_log (actor, action) VALUES (:actor, :action);
+UPDATE users SET last_seen = now() WHERE id = :user_id;
+```
+
+Rules:
+
+- Only recognised in the leading comment block. Once real SQL starts,
+  no further marker is honoured.
+- Applies to both GET and POST (transaction is essentially free for a
+  read-only statement; primary use case is POST).
+- Absence of the marker preserves the pre-v0.1.0-alpha.2 behaviour of
+  auto-commit per statement.

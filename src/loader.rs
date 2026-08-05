@@ -13,6 +13,32 @@ pub struct SavedQuery {
     pub path: String,
     pub sql: String,
     pub source_file: PathBuf,
+    /// True when the SQL file's leading comment block contains
+    /// `-- @transactional`. The dispatcher then wraps this endpoint's
+    /// execution in a single database transaction (commit on success,
+    /// rollback on any error). Batch endpoints are always transactional
+    /// regardless of this flag — see `query::execute_batch`.
+    pub transactional: bool,
+}
+
+/// Scan the leading comment lines of `sql` for a `-- @transactional`
+/// marker. Only comments before the first non-comment line are considered;
+/// once real SQL starts, no further markers are recognised.
+pub fn parse_transactional_marker(sql: &str) -> bool {
+    for line in sql.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if !trimmed.starts_with("--") {
+            break;
+        }
+        let rest = trimmed.trim_start_matches('-').trim();
+        if rest == "@transactional" || rest.starts_with("@transactional ") {
+            return true;
+        }
+    }
+    false
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -184,12 +210,14 @@ fn walk_method_dir(
                 reason: "file is empty".into(),
             });
         }
+        let transactional = parse_transactional_marker(&sql);
         index.insert(SavedQuery {
             project: project.to_string(),
             method,
             path: rel_str,
             sql,
             source_file: entry,
+            transactional,
         })?;
     }
     Ok(())
@@ -291,5 +319,59 @@ mod tests {
         write(td.path(), "crm/GET/a/b/c/deep.sql", "SELECT 1");
         let idx = load_dir(td.path()).unwrap();
         assert!(idx.get(HttpMethod::Get, "crm", "a/b/c/deep").is_some());
+    }
+
+    #[test]
+    fn transactional_marker_default_off() {
+        let td = TempDir::new().unwrap();
+        write(td.path(), "crm/POST/x.sql", "INSERT INTO t VALUES (:x)");
+        let idx = load_dir(td.path()).unwrap();
+        let q = idx.get(HttpMethod::Post, "crm", "x").unwrap();
+        assert!(!q.transactional);
+    }
+
+    #[test]
+    fn transactional_marker_recognised_bare() {
+        assert!(parse_transactional_marker(
+            "-- @transactional\nINSERT INTO t VALUES (:x)"
+        ));
+    }
+
+    #[test]
+    fn transactional_marker_recognised_with_trailing_text() {
+        assert!(parse_transactional_marker(
+            "-- @transactional (opt-in per task 003)\nINSERT INTO t VALUES (:x)"
+        ));
+    }
+
+    #[test]
+    fn transactional_marker_ignored_after_real_sql() {
+        // A marker that appears after any statement text must NOT count.
+        assert!(!parse_transactional_marker(
+            "INSERT INTO t VALUES (:x);\n-- @transactional\n"
+        ));
+    }
+
+    #[test]
+    fn transactional_marker_ignored_when_not_dashes() {
+        assert!(!parse_transactional_marker(
+            "/* @transactional */ INSERT INTO t VALUES (:x)"
+        ));
+    }
+
+    #[test]
+    fn transactional_marker_flows_into_saved_query() {
+        let td = TempDir::new().unwrap();
+        write(
+            td.path(),
+            "crm/POST/tx.sql",
+            "-- @transactional\nINSERT INTO t VALUES (:x)",
+        );
+        let idx = load_dir(td.path()).unwrap();
+        assert!(
+            idx.get(HttpMethod::Post, "crm", "tx")
+                .unwrap()
+                .transactional
+        );
     }
 }

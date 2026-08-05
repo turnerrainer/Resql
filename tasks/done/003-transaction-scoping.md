@@ -35,12 +35,17 @@ Alternative: add `?tx=true` query param. Rejected because SQL file
 semantics should not depend on how the endpoint is called.
 
 ## Acceptance
-- [ ] `-- @transactional` marker recognised at load time (added to `SavedQuery` struct).
-- [ ] Postgres path: `pool.begin()` → bind → commit; rollback on error.
-- [ ] SQLite path: same.
-- [ ] Batch path: single transaction spans all N calls.
-- [ ] Integration test: batch of 3 where the 2nd fails leaves 0 rows inserted.
-- [ ] Documented in `book/src/sql-files.md`.
+- [x] `-- @transactional` marker recognised at load time (added to `SavedQuery` struct). `src/loader.rs::parse_transactional_marker` + `SavedQuery.transactional`.
+- [x] Postgres path: `pool.begin()` → bind → commit; rollback on error. `src/query.rs::execute_transactional` (Postgres branch) + `finalise_tx`.
+- [x] SQLite path: same. Same function, SQLite branch + `finalise_tx_sqlite`.
+- [x] Batch path: single transaction spans all N calls. **Superseded by task 007** — `query::execute_batch` opens one tx, iterates, commits or rolls back atomically. Not gated on the `@transactional` marker: batching is always atomic now.
+- [x] Integration test: batch of 3 where the 2nd fails leaves 0 rows inserted. `batch_rolls_back_on_error_no_partial_writes` (SQLite) and `pg_batch_rolls_back_on_error` (Postgres).
+- [x] Single-shot transactional-marker test: `transactional_marker_rolls_back_on_error` (SQLite) + `pg_transactional_marker_rolls_back_multistatement` (Postgres) — plus a control test `non_transactional_post_leaves_committed_writes` proving that WITHOUT the marker, multi-statement failures leave earlier statements committed (the exact behaviour the marker fixes).
+- [x] Documented in `book/src/sql-files.md`. New section `Per-file @transactional marker`.
+
+## Landed
+
+2026-08-05 alongside task 007, in commits on `refacto/spec-compliance-v1`. Released as v0.1.0-alpha.2.
 
 ## Estimated effort
 1 day.

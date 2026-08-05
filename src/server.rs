@@ -169,7 +169,11 @@ async fn dispatch(
         .registry
         .get(&ds_name)
         .ok_or_else(|| ResqlError::UnknownDataSource(ds_name.clone()))?;
-    let rows = query::execute(pool, &saved.sql, &body).await?;
+    let rows = if saved.transactional {
+        query::execute_transactional(pool, &saved.sql, &body).await?
+    } else {
+        query::execute(pool, &saved.sql, &body).await?
+    };
     Ok(Json(json!(rows)))
 }
 
@@ -199,11 +203,8 @@ async fn dispatch_batch(
         ResqlError::MalformedRequest(format!("batch body must be {{queries: [...]}}: {e}"))
     })?;
 
-    let mut all: Vec<Value> = Vec::with_capacity(batch.queries.len());
-    for params in batch.queries {
-        let rows = query::execute(pool, &saved.sql, &params).await?;
-        all.push(json!(rows));
-    }
+    let results = query::execute_batch(pool, &saved.sql, batch.queries).await?;
+    let all: Vec<Value> = results.into_iter().map(|rows| json!(rows)).collect();
     Ok(Json(Value::Array(all)))
 }
 

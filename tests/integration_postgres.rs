@@ -379,15 +379,275 @@ async fn pg_datasources_endpoint_shows_pg_driver() {
         .iter()
         .find(|e| e["name"] == "pg")
         .expect("pg datasource should be listed");
-    assert_eq!(entry["driver"], "postgres");
-    // Password never leaks even when the URL has one.
-    let url_field = entry["url"].as_str().unwrap();
+    // Java-compat: the /datasources response uses Java-canonical camelCase
+    // (`driverClassName`, `jdbcUrl`) rather than short field names, so
+    // existing Spring-era dashboards keep working. Assert both shape and
+    // password masking.
+    assert_eq!(entry["driverClassName"], "org.postgresql.Driver");
+    let url_field = entry["jdbcUrl"].as_str().unwrap();
     if url_field.contains('@') {
         assert!(
             url_field.contains("*****"),
             "password should be masked, saw: {url_field}"
         );
     }
+}
+
+// ─── Task 007-3a: atomic batch ───────────────────────────────────────
+
+/// Batch of 3 inserts where the 2nd violates UNIQUE — verify 0 rows
+/// were committed. Without transactional batch, iteration 1's row would
+/// persist and iteration 2 would return 400. Post-007, the whole batch
+/// rolls back.
+#[tokio::test]
+async fn pg_batch_rolls_back_on_error() {
+    let url = require_pg!();
+    let app = app_with_pg(&url).await;
+    let login_a = format!("txbatch_a_{}", uuid());
+    let payload = json!({
+        "queries": [
+            {"login": login_a, "email": "a@x", "status": "active"},
+            {"login": login_a, "email": "dup@x", "status": "active"},
+            {"login": format!("txbatch_c_{}", uuid()), "email": "c@x", "status": "active"},
+        ]
+    });
+    let (status, body) = app
+        .request(
+            "POST",
+            "/pg/users/create/batch",
+            Some(&payload.to_string()),
+            &[],
+        )
+        .await;
+    assert_eq!(status, 400);
+    assert_eq!(body["error"], "BadSqlGrammarException");
+
+    // Iteration 1's login must NOT be persisted.
+    let (s2, found) = app
+        .request(
+            "GET",
+            &format!("/pg/users/find-by-login?login={login_a}"),
+            None,
+            &[],
+        )
+        .await;
+    assert_eq!(s2, 200);
+    assert!(
+        found.as_array().unwrap().is_empty(),
+        "iteration 1 must have rolled back; got {found}"
+    );
+}
+
+// ─── Task 007-3b: native Postgres array binding ──────────────────────
+
+async fn app_with_arrays(url: &str) -> common::TestApp {
+    TestAppBuilder::new()
+        .no_sqlite_datasources()
+        .with_postgres_datasource("pg", url)
+        .with_sql("pg/POST/arrays/unnest-int.sql", "SELECT unnest(:xs) AS n")
+        .with_sql("pg/POST/arrays/unnest-text.sql", "SELECT unnest(:xs) AS s")
+        .with_sql("pg/POST/arrays/unnest-bool.sql", "SELECT unnest(:xs) AS b")
+        .with_sql("pg/POST/arrays/unnest-float.sql", "SELECT unnest(:xs) AS f")
+        .with_sql(
+            "pg/POST/arrays/mixed-jsonb.sql",
+            // Heterogeneous → falls back to JSONB; caller must use
+            // jsonb_array_elements() and pull a specific type per element.
+            "SELECT jsonb_array_length(:xs::jsonb) AS len",
+        )
+        .with_sql(
+            "pg/POST/arrays/bulk-insert.sql",
+            // Single-round-trip bulk insert: two parallel arrays fanned
+            // out with unnest into a real INSERT ... SELECT.
+            "INSERT INTO audit_log (actor, action) \
+             SELECT unnest(:actors), unnest(:actions) \
+             RETURNING id, actor, action",
+        )
+        .build()
+        .await
+}
+
+#[tokio::test]
+async fn pg_native_int_array_via_unnest() {
+    let url = require_pg!();
+    let app = app_with_arrays(&url).await;
+    let (status, body) = app
+        .request(
+            "POST",
+            "/pg/arrays/unnest-int",
+            Some(r#"{"xs": [10, 20, 30]}"#),
+            &[],
+        )
+        .await;
+    assert_eq!(status, 200);
+    let arr = body.as_array().unwrap();
+    assert_eq!(arr.len(), 3);
+    let ns: Vec<i64> = arr.iter().map(|r| r["n"].as_i64().unwrap()).collect();
+    assert_eq!(ns, vec![10, 20, 30]);
+}
+
+#[tokio::test]
+async fn pg_native_text_array_via_unnest() {
+    let url = require_pg!();
+    let app = app_with_arrays(&url).await;
+    let (status, body) = app
+        .request(
+            "POST",
+            "/pg/arrays/unnest-text",
+            Some(r#"{"xs": ["alpha", "beta", "gamma"]}"#),
+            &[],
+        )
+        .await;
+    assert_eq!(status, 200);
+    let strs: Vec<&str> = body
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["s"].as_str().unwrap())
+        .collect();
+    assert_eq!(strs, vec!["alpha", "beta", "gamma"]);
+}
+
+#[tokio::test]
+async fn pg_native_bool_array_via_unnest() {
+    let url = require_pg!();
+    let app = app_with_arrays(&url).await;
+    let (status, body) = app
+        .request(
+            "POST",
+            "/pg/arrays/unnest-bool",
+            Some(r#"{"xs": [true, false, true]}"#),
+            &[],
+        )
+        .await;
+    assert_eq!(status, 200);
+    let bs: Vec<bool> = body
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["b"].as_bool().unwrap())
+        .collect();
+    assert_eq!(bs, vec![true, false, true]);
+}
+
+#[tokio::test]
+async fn pg_native_float_array_via_unnest() {
+    let url = require_pg!();
+    let app = app_with_arrays(&url).await;
+    let (status, body) = app
+        .request(
+            "POST",
+            "/pg/arrays/unnest-float",
+            Some(r#"{"xs": [1.5, 2.5, 3.5]}"#),
+            &[],
+        )
+        .await;
+    assert_eq!(status, 200);
+    let fs: Vec<f64> = body
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["f"].as_f64().unwrap())
+        .collect();
+    assert_eq!(fs, vec![1.5, 2.5, 3.5]);
+}
+
+#[tokio::test]
+async fn pg_heterogeneous_array_falls_back_to_jsonb() {
+    let url = require_pg!();
+    let app = app_with_arrays(&url).await;
+    let (status, body) = app
+        .request(
+            "POST",
+            "/pg/arrays/mixed-jsonb",
+            Some(r#"{"xs": [1, "two", true]}"#),
+            &[],
+        )
+        .await;
+    assert_eq!(status, 200);
+    assert_eq!(body[0]["len"], 3);
+}
+
+#[tokio::test]
+async fn pg_bulk_insert_via_arrays_single_round_trip() {
+    // The 3c value proposition: caller pre-pivots data to column arrays,
+    // one HTTP request → one INSERT ... SELECT unnest() → N rows.
+    let url = require_pg!();
+    let app = app_with_arrays(&url).await;
+    let a = format!("bulk_a_{}", uuid());
+    let b = format!("bulk_b_{}", uuid());
+    let payload = json!({
+        "actors": [a, b],
+        "actions": ["created", "updated"],
+    });
+    let (status, body) = app
+        .request(
+            "POST",
+            "/pg/arrays/bulk-insert",
+            Some(&payload.to_string()),
+            &[],
+        )
+        .await;
+    assert_eq!(status, 200);
+    let arr = body.as_array().unwrap();
+    assert_eq!(arr.len(), 2);
+    assert_eq!(arr[0]["action"], "created");
+    assert_eq!(arr[1]["action"], "updated");
+}
+
+// ─── Task 003 on Postgres: @transactional single-shot rollback ───────
+
+async fn app_with_tx_marker(url: &str) -> common::TestApp {
+    TestAppBuilder::new()
+        .no_sqlite_datasources()
+        .with_postgres_datasource("pg", url)
+        .with_sql(
+            "pg/POST/tx/insert-then-fail.sql",
+            "-- @transactional\n\
+             INSERT INTO audit_log (actor, action) VALUES (:actor, 'first'); \
+             SELECT * FROM definitely_not_a_table",
+        )
+        .with_sql(
+            "pg/POST/audit/append.sql",
+            "INSERT INTO audit_log (actor, action) VALUES (:actor, :action) \
+             RETURNING id",
+        )
+        .with_sql(
+            "pg/GET/audit/count-by-actor.sql",
+            "SELECT count(*) AS n FROM audit_log WHERE actor = :actor",
+        )
+        .build()
+        .await
+}
+
+#[tokio::test]
+async fn pg_transactional_marker_rolls_back_multistatement() {
+    let url = require_pg!();
+    let app = app_with_tx_marker(&url).await;
+    let actor = format!("txmarker_{}", uuid());
+    let (status, body) = app
+        .request(
+            "POST",
+            "/pg/tx/insert-then-fail",
+            Some(&json!({"actor": actor}).to_string()),
+            &[],
+        )
+        .await;
+    assert_eq!(status, 400);
+    assert_eq!(body["error"], "BadSqlGrammarException");
+
+    let (s2, cnt) = app
+        .request(
+            "GET",
+            &format!("/pg/audit/count-by-actor?actor={actor}"),
+            None,
+            &[],
+        )
+        .await;
+    assert_eq!(s2, 200);
+    assert_eq!(
+        cnt[0]["n"], 0,
+        "@transactional must have rolled back the INSERT"
+    );
 }
 
 fn uuid() -> String {
