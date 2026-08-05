@@ -2,8 +2,8 @@
 
 **Written:** 2026-07-29 (Postgres/Liquibase addendum 2026-07-30)
 **Last verified green (local):** 2026-07-30 — cargo test 93/0/0 with `TEST_POSTGRES_URL` set (49 unit + 44 integration incl. 16 Postgres); fmt + clippy -D warnings clean; cargo audit + deny clean; mdbook + linkcheck clean; docker build + smoke pass on the multi-DB demo.
-**Branch:** `dev` (default). Tag `v0.1.0-alpha.1` published 2026-07-31.
-**Release status:** Published. Image at `docker.io/turnerrainer/resql:0.1.0-alpha.1` and `ghcr.io/turnerrainer/resql:0.1.0-alpha.1`, cosign-signed keyless via GHA OIDC. Docs at https://turnerrainer.github.io/Resql/. Health verified: `{"appName":"resql","version":"0.1.0-alpha.1","status":"UP"}`.
+**Branch:** `refacto/spec-compliance-v1` (working). `dev` (default) still points at v0.1.0-alpha.1 (2026-07-31 publish).
+**Release status:** v0.1.0-alpha.1 published 2026-07-31 (`docker.io/turnerrainer/resql:0.1.0-alpha.1`, `ghcr.io/turnerrainer/resql:0.1.0-alpha.1`, cosign-signed). **v0.1.0-alpha.2 is prepared on `refacto/spec-compliance-v1` but not yet published** — it adds task 007 (atomic batch + native Postgres array binding), task 003 (per-file `@transactional` marker), and the Java-compat layer landed since alpha.1.
 
 **Pending operator follow-ups:**
 - **Rotate the Docker Hub PAT.** The one used for `DOCKERHUB_TOKEN` was pasted in the release chat and should be considered compromised. Generate a new PAT, then re-set the secret: `echo -n '<new-pat>' | gh secret set DOCKERHUB_TOKEN --repo turnerrainer/Resql`.
@@ -112,7 +112,7 @@ echo -n '<paste-token-here>' | gh secret set DOCKERHUB_TOKEN --repo turnerrainer
 cd /home/rainer/Desktop/Buerostack/Resql-on-Rust   # on-disk dir name is legacy; project name is Resql
 git remote add origin git@github.com:turnerrainer/Resql.git   # if not already
 git push -u origin dev
-git push origin v0.1.0-alpha.1
+git push origin v0.1.0-alpha.2
 ```
 
 The `publish.yml` workflow triggers on the tag push. Watch it:
@@ -133,8 +133,8 @@ Personal-namespace packages need an explicit repo link before `GITHUB_TOKEN` can
 
 ```bash
 docker logout && docker system prune -f
-docker pull docker.io/turnerrainer/resql:0.1.0-alpha.1
-docker run --rm -p 18080:8080 -d --name resql-live docker.io/turnerrainer/resql:0.1.0-alpha.1
+docker pull docker.io/turnerrainer/resql:0.1.0-alpha.2
+docker run --rm -p 18080:8080 -d --name resql-live docker.io/turnerrainer/resql:0.1.0-alpha.2
 sleep 2
 curl http://localhost:18080/health
 docker stop resql-live
@@ -165,13 +165,13 @@ Landed (see [CHANGELOG.md](./CHANGELOG.md)):
 - ✅ Task 001 — domain deep-dive → `docs/DESIGN.md`
 - ✅ Task 002 — MVP per DESIGN §8
 - ✅ Task 006 — Postgres integration tests + Liquibase-managed schema (2026-07-30)
+- ✅ Task 003 — Per-file `@transactional` marker (2026-08-05, ships in alpha.2)
+- ✅ Task 007 — Atomic `/batch` + native Postgres array binding (2026-08-05, ships in alpha.2). `?mode=bulk` routing was skipped as under-specified — see task file's completion notes.
 
 Open backlog:
 
 | Task | Sev | Location | Notes |
 |---|---|---|---|
-| **007** | **High** | `tasks/backlog/007-atomic-batch-insert.md` | Make `/batch` atomic + one round-trip + native array binding; supersedes 003's batch part |
-| 003 | Med | `tasks/backlog/003-transaction-scoping.md` | Per-file `@transactional` marker for single-shot POSTs (see note re: 007) |
 | 004 | Med | `tasks/backlog/004-opentelemetry-wire-up.md` | Actually export OTLP traces (currently no OTel deps) |
 | 005 | Low | `tasks/backlog/005-mysql-driver-optional.md` | Consider MySQL — needs STANDARDS §"driver support" review |
 

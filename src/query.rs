@@ -132,63 +132,184 @@ pub async fn execute(
 ) -> Result<Vec<Map<String, Value>>, ResqlError> {
     let dialect = Dialect::from(pool);
     let (rewritten, param_names) = rewrite_named_params(sql, dialect);
-
-    let param_map = match params {
-        Value::Object(m) => m.clone(),
-        Value::Null => Map::new(),
-        _ => {
-            return Err(ResqlError::MalformedRequest(
-                "request body must be a JSON object or null".into(),
-            ));
-        }
-    };
-
-    // Missing-parameter check (matches Java NamedParameterJdbcTemplate behavior).
-    for name in &param_names {
-        if !param_map.contains_key(name) {
-            return Err(ResqlError::MissingParameter(name.clone()));
-        }
-    }
+    let param_map = normalise_params(params)?;
+    check_missing(&param_names, &param_map)?;
 
     match pool {
-        Pool::Postgres(pg) => execute_pg(pg, &rewritten, &param_names, &param_map).await,
-        Pool::Sqlite(sq) => execute_sqlite(sq, &rewritten, &param_names, &param_map).await,
+        Pool::Postgres(pg) => run_pg(pg, &rewritten, &param_names, &param_map).await,
+        Pool::Sqlite(sq) => run_sqlite(sq, &rewritten, &param_names, &param_map).await,
     }
 }
 
-async fn execute_pg(
-    pool: &sqlx::PgPool,
+/// Execute a saved SQL inside a fresh transaction. Commits on success,
+/// rolls back on any error. Used for endpoints marked `-- @transactional`
+/// (see `loader::parse_transactional_marker`).
+pub async fn execute_transactional(
+    pool: &Pool,
+    sql: &str,
+    params: &Value,
+) -> Result<Vec<Map<String, Value>>, ResqlError> {
+    let dialect = Dialect::from(pool);
+    let (rewritten, param_names) = rewrite_named_params(sql, dialect);
+    let param_map = normalise_params(params)?;
+    check_missing(&param_names, &param_map)?;
+
+    match pool {
+        Pool::Postgres(pg) => {
+            let mut tx = pg.begin().await.map_err(sql_err)?;
+            let result = run_pg(&mut *tx, &rewritten, &param_names, &param_map).await;
+            finalise_tx(tx, result).await
+        }
+        Pool::Sqlite(sq) => {
+            let mut tx = sq.begin().await.map_err(sql_err)?;
+            let result = run_sqlite(&mut *tx, &rewritten, &param_names, &param_map).await;
+            finalise_tx_sqlite(tx, result).await
+        }
+    }
+}
+
+/// Execute N parameter sets against the same SQL atomically. All bind
+/// through the same transaction; any failure rolls the whole batch back —
+/// no partial writes. Returns one row-set per parameter set on success.
+pub async fn execute_batch(
+    pool: &Pool,
+    sql: &str,
+    param_sets: Vec<Value>,
+) -> Result<Vec<Vec<Map<String, Value>>>, ResqlError> {
+    let dialect = Dialect::from(pool);
+    let (rewritten, param_names) = rewrite_named_params(sql, dialect);
+
+    // Normalise + missing-param check every set BEFORE opening the tx so
+    // the "batch of bad requests" case fails fast without hitting the DB.
+    let mut normalised: Vec<Map<String, Value>> = Vec::with_capacity(param_sets.len());
+    for p in &param_sets {
+        let m = normalise_params(p)?;
+        check_missing(&param_names, &m)?;
+        normalised.push(m);
+    }
+
+    match pool {
+        Pool::Postgres(pg) => {
+            let mut tx = pg.begin().await.map_err(sql_err)?;
+            let mut all = Vec::with_capacity(normalised.len());
+            for pm in &normalised {
+                match run_pg(&mut *tx, &rewritten, &param_names, pm).await {
+                    Ok(rows) => all.push(rows),
+                    Err(e) => {
+                        let _ = tx.rollback().await;
+                        return Err(e);
+                    }
+                }
+            }
+            tx.commit().await.map_err(sql_err)?;
+            Ok(all)
+        }
+        Pool::Sqlite(sq) => {
+            let mut tx = sq.begin().await.map_err(sql_err)?;
+            let mut all = Vec::with_capacity(normalised.len());
+            for pm in &normalised {
+                match run_sqlite(&mut *tx, &rewritten, &param_names, pm).await {
+                    Ok(rows) => all.push(rows),
+                    Err(e) => {
+                        let _ = tx.rollback().await;
+                        return Err(e);
+                    }
+                }
+            }
+            tx.commit().await.map_err(sql_err)?;
+            Ok(all)
+        }
+    }
+}
+
+fn normalise_params(v: &Value) -> Result<Map<String, Value>, ResqlError> {
+    match v {
+        Value::Object(m) => Ok(m.clone()),
+        Value::Null => Ok(Map::new()),
+        _ => Err(ResqlError::MalformedRequest(
+            "request body must be a JSON object or null".into(),
+        )),
+    }
+}
+
+fn check_missing(names: &[String], params: &Map<String, Value>) -> Result<(), ResqlError> {
+    for name in names {
+        if !params.contains_key(name) {
+            return Err(ResqlError::MissingParameter(name.clone()));
+        }
+    }
+    Ok(())
+}
+
+fn sql_err(e: sqlx::Error) -> ResqlError {
+    ResqlError::SqlExecution(e.to_string())
+}
+
+async fn finalise_tx<'c>(
+    tx: sqlx::Transaction<'c, sqlx::Postgres>,
+    result: Result<Vec<Map<String, Value>>, ResqlError>,
+) -> Result<Vec<Map<String, Value>>, ResqlError> {
+    match result {
+        Ok(rows) => {
+            tx.commit().await.map_err(sql_err)?;
+            Ok(rows)
+        }
+        Err(e) => {
+            let _ = tx.rollback().await;
+            Err(e)
+        }
+    }
+}
+
+async fn finalise_tx_sqlite<'c>(
+    tx: sqlx::Transaction<'c, sqlx::Sqlite>,
+    result: Result<Vec<Map<String, Value>>, ResqlError>,
+) -> Result<Vec<Map<String, Value>>, ResqlError> {
+    match result {
+        Ok(rows) => {
+            tx.commit().await.map_err(sql_err)?;
+            Ok(rows)
+        }
+        Err(e) => {
+            let _ = tx.rollback().await;
+            Err(e)
+        }
+    }
+}
+
+async fn run_pg<'e, E>(
+    exec: E,
     sql: &str,
     names: &[String],
     params: &Map<String, Value>,
-) -> Result<Vec<Map<String, Value>>, ResqlError> {
+) -> Result<Vec<Map<String, Value>>, ResqlError>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
     let mut q = sqlx::query(sql);
     for name in names {
         let v = params.get(name).cloned().unwrap_or(Value::Null);
         q = bind_pg(q, v);
     }
-    let rows = q
-        .fetch_all(pool)
-        .await
-        .map_err(|e| ResqlError::SqlExecution(e.to_string()))?;
+    let rows = q.fetch_all(exec).await.map_err(sql_err)?;
     Ok(rows.iter().map(pg_row_to_json).collect())
 }
 
-async fn execute_sqlite(
-    pool: &sqlx::SqlitePool,
+async fn run_sqlite<'e, E>(
+    exec: E,
     sql: &str,
     names: &[String],
     params: &Map<String, Value>,
-) -> Result<Vec<Map<String, Value>>, ResqlError> {
+) -> Result<Vec<Map<String, Value>>, ResqlError>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
     let mut q = sqlx::query(sql);
     for name in names {
         let v = params.get(name).cloned().unwrap_or(Value::Null);
         q = bind_sqlite(q, v);
     }
-    let rows = q
-        .fetch_all(pool)
-        .await
-        .map_err(|e| ResqlError::SqlExecution(e.to_string()))?;
+    let rows = q.fetch_all(exec).await.map_err(sql_err)?;
     Ok(rows.iter().map(sqlite_row_to_json).collect())
 }
 
@@ -211,7 +332,117 @@ fn bind_pg<'q>(
             }
         }
         Value::String(s) => q.bind(s),
-        Value::Array(_) | Value::Object(_) => q.bind(sqlx::types::Json(v)),
+        Value::Array(items) => bind_pg_array(q, items),
+        Value::Object(_) => q.bind(sqlx::types::Json(v)),
+    }
+}
+
+/// Homogeneous-scalar arrays bind natively (text[], int8[], float8[],
+/// bool[]) so callers can do `unnest(:xs)` in one round-trip. Anything
+/// else (empty, all-null, mixed, nested) falls back to JSONB.
+///
+/// Nulls inside an otherwise-homogeneous array stay as SQL NULL elements
+/// (via `Vec<Option<T>>`).
+fn bind_pg_array<'q>(
+    q: sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments>,
+    items: Vec<Value>,
+) -> sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments> {
+    match detect_pg_array_kind(&items) {
+        Some(PgArrayKind::Int) => {
+            let v: Vec<Option<i64>> = items
+                .iter()
+                .map(|e| match e {
+                    Value::Null => None,
+                    Value::Number(n) => n.as_i64().or_else(|| n.as_u64().map(|u| u as i64)),
+                    _ => None,
+                })
+                .collect();
+            q.bind(v)
+        }
+        Some(PgArrayKind::Float) => {
+            let v: Vec<Option<f64>> = items
+                .iter()
+                .map(|e| match e {
+                    Value::Null => None,
+                    Value::Number(n) => n.as_f64(),
+                    _ => None,
+                })
+                .collect();
+            q.bind(v)
+        }
+        Some(PgArrayKind::Text) => {
+            let v: Vec<Option<String>> = items
+                .iter()
+                .map(|e| match e {
+                    Value::Null => None,
+                    Value::String(s) => Some(s.clone()),
+                    _ => None,
+                })
+                .collect();
+            q.bind(v)
+        }
+        Some(PgArrayKind::Bool) => {
+            let v: Vec<Option<bool>> = items
+                .iter()
+                .map(|e| match e {
+                    Value::Null => None,
+                    Value::Bool(b) => Some(*b),
+                    _ => None,
+                })
+                .collect();
+            q.bind(v)
+        }
+        None => {
+            // Empty, all-null, mixed, or nested — bind as JSONB and let
+            // the SQL author use jsonb_array_elements* if they need it.
+            // Emit a debug-level trace so operators can see when the
+            // heuristic couldn't infer a scalar type; not warn because
+            // legitimate JSONB use is common.
+            tracing::debug!("array parameter has no homogeneous scalar type; binding as JSONB");
+            q.bind(sqlx::types::Json(Value::Array(items)))
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum PgArrayKind {
+    Int,
+    Float,
+    Text,
+    Bool,
+}
+
+fn detect_pg_array_kind(elems: &[Value]) -> Option<PgArrayKind> {
+    let mut kind: Option<PgArrayKind> = None;
+    let mut saw_non_null = false;
+    for e in elems {
+        let observed = match e {
+            Value::Null => continue,
+            Value::Bool(_) => PgArrayKind::Bool,
+            Value::Number(n) => {
+                if n.is_i64() || n.is_u64() {
+                    PgArrayKind::Int
+                } else {
+                    PgArrayKind::Float
+                }
+            }
+            Value::String(_) => PgArrayKind::Text,
+            Value::Array(_) | Value::Object(_) => return None,
+        };
+        saw_non_null = true;
+        kind = Some(match (kind, observed) {
+            (None, k) => k,
+            (Some(existing), k) if existing == k => existing,
+            // Int + Float → promote to Float (Postgres float8[] holds both).
+            (Some(PgArrayKind::Int), PgArrayKind::Float)
+            | (Some(PgArrayKind::Float), PgArrayKind::Int) => PgArrayKind::Float,
+            _ => return None, // mixed scalar kinds
+        });
+    }
+    if saw_non_null {
+        kind
+    } else {
+        None
     }
 }
 
@@ -584,6 +815,60 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(rows[0].get("isNull").unwrap(), &json!(1));
+    }
+
+    #[test]
+    fn array_kind_detects_int() {
+        let v = vec![json!(1), json!(2), json!(-3)];
+        assert_eq!(detect_pg_array_kind(&v), Some(PgArrayKind::Int));
+    }
+
+    #[test]
+    fn array_kind_detects_text() {
+        let v = vec![json!("a"), json!("b")];
+        assert_eq!(detect_pg_array_kind(&v), Some(PgArrayKind::Text));
+    }
+
+    #[test]
+    fn array_kind_detects_bool() {
+        let v = vec![json!(true), json!(false)];
+        assert_eq!(detect_pg_array_kind(&v), Some(PgArrayKind::Bool));
+    }
+
+    #[test]
+    fn array_kind_promotes_int_to_float_when_mixed() {
+        let v = vec![json!(1), json!(2.5), json!(3)];
+        assert_eq!(detect_pg_array_kind(&v), Some(PgArrayKind::Float));
+    }
+
+    #[test]
+    fn array_kind_permits_null_gaps() {
+        let v = vec![json!(1), json!(Value::Null), json!(3)];
+        assert_eq!(detect_pg_array_kind(&v), Some(PgArrayKind::Int));
+    }
+
+    #[test]
+    fn array_kind_none_when_mixed_scalars() {
+        let v = vec![json!(1), json!("two"), json!(3)];
+        assert_eq!(detect_pg_array_kind(&v), None);
+    }
+
+    #[test]
+    fn array_kind_none_when_nested() {
+        let v = vec![json!([1, 2]), json!([3, 4])];
+        assert_eq!(detect_pg_array_kind(&v), None);
+    }
+
+    #[test]
+    fn array_kind_none_when_empty() {
+        let v: Vec<Value> = vec![];
+        assert_eq!(detect_pg_array_kind(&v), None);
+    }
+
+    #[test]
+    fn array_kind_none_when_all_null() {
+        let v = vec![json!(Value::Null), json!(Value::Null)];
+        assert_eq!(detect_pg_array_kind(&v), None);
     }
 
     #[tokio::test]

@@ -1,0 +1,9 @@
+[
+  {
+    "_comment": "Structural reference for GET /datasources — matches Java DataSourceConfigProperties (4 fields, password stripped). One entry per configured datasource.",
+    "name": "crm",
+    "jdbcUrl": "jdbc:h2:mem:crm-db;DATABASE_TO_UPPER=false",
+    "username": "crm-user",
+    "driverClassName": "org.h2.Driver"
+  }
+]

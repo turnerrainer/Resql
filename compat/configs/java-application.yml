@@ -1,0 +1,28 @@
+# Reference Java Resql application.yml for cross-implementation runs.
+# This file is a copy of Resql/src/main/resources/application.yml with the
+# DB URL pointed at the shared compat Postgres (see compat/README.md).
+spring:
+  profiles:
+    active: dev
+
+server:
+  port: 8082
+
+headers:
+  contentSecurityPolicy: "script-src 'self'"
+
+userIPHeaderName: x-forwarded-for
+userIPLoggingPrefix: from IP
+userIPLoggingMDCkey: userIP
+
+sqlms:
+  saved-queries-dir: "./compat/templates/"
+  datasources:
+    - name: byk
+      jdbcUrl: jdbc:postgresql://localhost:15432/compat
+      username: postgres
+      password: compat
+      driverClassName: org.postgresql.Driver
+logging:
+  level:
+    root: info

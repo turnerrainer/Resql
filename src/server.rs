@@ -64,27 +64,37 @@ async fn health_handler(State(state): State<AppState>) -> Json<health::HealthRes
     Json(health::build(state.start))
 }
 
+/// `/datasources` response entry. Shape mirrors Java's
+/// `DataSourceConfigProperties` (name, jdbcUrl, username, driverClassName)
+/// with the password field stripped (matches Java's `@JsonIgnore` on
+/// `password`). Field names are the Java-canonical camelCase forms so
+/// existing dashboards / grep patterns keep working.
 #[derive(Serialize)]
 struct DatasourceView {
     name: String,
-    url: String,
-    driver: &'static str,
+    #[serde(rename = "jdbcUrl")]
+    jdbc_url: String,
+    username: String,
+    #[serde(rename = "driverClassName")]
+    driver_class_name: &'static str,
 }
 
 async fn list_datasources(State(state): State<AppState>) -> Json<Vec<DatasourceView>> {
     let mut out = Vec::new();
     for name in state.registry.names() {
         let ds_cfg = state.config.datasources.iter().find(|d| d.name == name);
-        let driver = match state.registry.get(&name) {
-            Some(crate::db::Pool::Postgres(_)) => "postgres",
-            Some(crate::db::Pool::Sqlite(_)) => "sqlite",
-            None => "unknown",
+        let driver_class_name = match state.registry.get(&name) {
+            Some(crate::db::Pool::Postgres(_)) => "org.postgresql.Driver",
+            Some(crate::db::Pool::Sqlite(_)) => "org.sqlite.JDBC",
+            None => "",
         };
-        let url_masked = ds_cfg.map(|d| mask_password(&d.url)).unwrap_or_default();
+        let jdbc_url = ds_cfg.map(|d| mask_password(&d.url)).unwrap_or_default();
+        let username = ds_cfg.map(|d| d.username.clone()).unwrap_or_default();
         out.push(DatasourceView {
             name,
-            url: url_masked,
-            driver,
+            jdbc_url,
+            username,
+            driver_class_name,
         });
     }
     Json(out)
@@ -159,7 +169,11 @@ async fn dispatch(
         .registry
         .get(&ds_name)
         .ok_or_else(|| ResqlError::UnknownDataSource(ds_name.clone()))?;
-    let rows = query::execute(pool, &saved.sql, &body).await?;
+    let rows = if saved.transactional {
+        query::execute_transactional(pool, &saved.sql, &body).await?
+    } else {
+        query::execute(pool, &saved.sql, &body).await?
+    };
     Ok(Json(json!(rows)))
 }
 
@@ -189,11 +203,8 @@ async fn dispatch_batch(
         ResqlError::MalformedRequest(format!("batch body must be {{queries: [...]}}: {e}"))
     })?;
 
-    let mut all: Vec<Value> = Vec::with_capacity(batch.queries.len());
-    for params in batch.queries {
-        let rows = query::execute(pool, &saved.sql, &params).await?;
-        all.push(json!(rows));
-    }
+    let results = query::execute_batch(pool, &saved.sql, batch.queries).await?;
+    let all: Vec<Value> = results.into_iter().map(|rows| json!(rows)).collect();
     Ok(Json(Value::Array(all)))
 }
 

@@ -58,6 +58,17 @@ does **not** attempt to run in a degraded state.
   logged unless the underlying driver reports it.
 - Panic in a handler → 500 with `InternalError`; the panic goes to logs
   with backtrace when `RUST_BACKTRACE=1`.
+- **Batch rollback on iteration N (since v0.1.0-alpha.2):** the batch
+  endpoint runs all iterations inside one transaction. When iteration
+  N fails (SQL error, constraint violation, etc.), iterations 1..N-1
+  are rolled back atomically. The client sees a single 400 with the
+  standard error shape from the failing iteration; there is no
+  per-iteration status array. To debug WHICH iteration triggered the
+  failure, log the request body on the client side or split the batch.
+- **`@transactional` marker rollback:** an endpoint marked
+  `-- @transactional` behaves the same on failure — the whole SQL file's
+  execution rolls back. Without the marker, mid-string failures in
+  multi-statement SQL may leave earlier statements committed.
 
 ## Debugging
 

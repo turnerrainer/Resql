@@ -4,6 +4,7 @@
 //! only supported consumer. Integration tests reach in via re-exports below.
 
 pub mod config;
+pub mod config_compat;
 pub mod db;
 pub mod error;
 pub mod health;

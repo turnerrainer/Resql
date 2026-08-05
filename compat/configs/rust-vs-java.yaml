@@ -1,0 +1,23 @@
+# Rust Resql config for cross-implementation runs.
+# Points at the SAME shared Postgres as compat/configs/java-application.yml.
+# The two configs must resolve to the same data for the diff in
+# compat/README.md to be meaningful.
+
+server:
+  bind: "0.0.0.0:8080"
+
+sql_dir: "./compat/templates/"
+
+# Match the Java behaviour of routing everything through the `byk` datasource,
+# regardless of URL project name.
+project_datasource_map:
+  services: byk
+
+datasources:
+  - name: byk
+    url: "postgres://localhost:15432/compat"
+    username: "postgres"
+    password_env: "COMPAT_PG_PW"    # export COMPAT_PG_PW=compat before running
+
+logging:
+  level: "info,resql=debug"

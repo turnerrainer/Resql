@@ -1,12 +1,13 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use clap::Parser;
 use tokio::net::TcpListener;
 use tokio::signal;
-use tracing::info;
+use tracing::{info, warn};
 
 use resql::config::Config;
+use resql::config_compat::DiagLevel;
 use resql::server;
 
 #[derive(Debug, Parser)]
@@ -16,26 +17,63 @@ use resql::server;
     about = "SQL-files-as-REST-endpoints microservice"
 )]
 struct Cli {
-    /// Path to the YAML config file.
-    #[arg(
-        short = 'c',
-        long = "config",
-        env = "RESQL_CONFIG",
-        default_value = "/app/resql.yaml"
-    )]
-    config: PathBuf,
+    /// Path to the YAML config file. When omitted, the following candidates
+    /// are tried in order (Rust-canonical first, Java-canonical second):
+    /// `/app/resql.yaml`, `./resql.yaml`, `./application.yml` (Java default),
+    /// `./application-prod.yml`, `./application-dev.yml`, `./application-test.yml`.
+    /// The first existing candidate wins.
+    #[arg(short = 'c', long = "config", env = "RESQL_CONFIG")]
+    config: Option<PathBuf>,
+}
+
+const CONFIG_CANDIDATES: &[&str] = &[
+    "/app/resql.yaml",
+    "./resql.yaml",
+    "./application.yml",
+    "./application-prod.yml",
+    "./application-dev.yml",
+    "./application-test.yml",
+];
+
+fn resolve_config_path(cli: &Cli) -> Result<PathBuf> {
+    if let Some(explicit) = &cli.config {
+        return Ok(explicit.clone());
+    }
+    for c in CONFIG_CANDIDATES {
+        let p = Path::new(c);
+        if p.exists() {
+            return Ok(p.to_path_buf());
+        }
+    }
+    anyhow::bail!(
+        "no config file found; searched {} and none exist. Set -c/--config or RESQL_CONFIG.",
+        CONFIG_CANDIDATES.join(", ")
+    )
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    let cfg = Config::from_path(&cli.config)
-        .with_context(|| format!("loading config from {}", cli.config.display()))?;
+    let config_path = resolve_config_path(&cli)?;
+    let cfg = Config::from_path(&config_path)
+        .with_context(|| format!("loading config from {}", config_path.display()))?;
 
     init_tracing(&cfg.logging.level, &cfg.logging.format);
 
+    // Boot-time diagnostic pass (REFACTO-REQUIREMENTS §6.2): every Java-shape
+    // field the compat shim recognised is announced here so the operator can
+    // determine "am I depending on anything the target doesn't implement?"
+    // from a single boot-log read.
+    for d in &cfg.compat_diagnostics {
+        match d.level {
+            DiagLevel::Warn => warn!(field = %d.source_field, "{}", d.message),
+            DiagLevel::Info => info!(field = %d.source_field, "{}", d.message),
+        }
+    }
+
     info!(
         version = env!("CARGO_PKG_VERSION"),
+        config = %config_path.display(),
         bind = %cfg.server.bind,
         sql_dir = %cfg.sql_dir.display(),
         datasources = cfg.datasources.len(),

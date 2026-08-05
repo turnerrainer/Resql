@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Tag to (re-)publish, e.g. v0.1.0-alpha.1"
+        description: "Tag to (re-)publish, e.g. v0.1.0-alpha.2"
         required: true
 
 concurrency:
@@ -46,7 +46,7 @@ jobs:
         id: tags
         run: |
           TAG='${{ steps.tag.outputs.tag }}'
-          VERSION="${TAG#v}"                             # 0.1.0 or 0.1.0-alpha.1
+          VERSION="${TAG#v}"                             # 0.1.0 or 0.1.0-alpha.2
           MAJOR_MINOR="${VERSION%.*}"
           TAG_LIST=""
           if [[ "$VERSION" == *-* ]]; then

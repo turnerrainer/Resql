@@ -2,6 +2,7 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use crate::config_compat::{preprocess, Diagnostic};
 use crate::error::ResqlError;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -9,17 +10,27 @@ use crate::error::ResqlError;
 pub struct Config {
     #[serde(default)]
     pub server: ServerConfig,
+    #[serde(default = "default_sql_dir")]
     pub sql_dir: PathBuf,
     #[serde(default)]
     pub project_datasource_map: HashMap<String, String>,
     #[serde(default = "default_allow_header")]
     pub allow_datasource_header: bool,
+    /// If set, batch requests hitting the Java-legacy `POST /{name}/batch`
+    /// URL shape use this datasource (Java hardcoded "byk"). If unset, the
+    /// legacy shape is rejected with an actionable error.
+    #[serde(default)]
+    pub default_datasource: Option<String>,
     #[serde(default)]
     pub datasources: Vec<DatasourceConfig>,
     #[serde(default)]
     pub cors: CorsConfig,
     #[serde(default)]
     pub logging: LoggingConfig,
+    /// Diagnostics collected by the compat shim. Populated in
+    /// `from_yaml_str`; consumed at boot by `main.rs`. Never serialized.
+    #[serde(skip)]
+    pub compat_diagnostics: Vec<Diagnostic>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -50,8 +61,15 @@ pub struct DatasourceConfig {
     pub url: String,
     #[serde(default)]
     pub username: String,
+    /// Env-var name to read the DB password from (Rust-canonical form).
+    /// Prefer this over `password` for security posture.
     #[serde(default)]
     pub password_env: String,
+    /// Plaintext password (Java-compat form). If set, `password_env` must
+    /// be empty; validation rejects both being present. The compat shim
+    /// emits a WARN whenever this field is used.
+    #[serde(default)]
+    pub password: Option<String>,
     #[serde(default = "default_max_conns")]
     pub max_connections: u32,
     #[serde(default = "default_acquire_timeout")]
@@ -94,6 +112,11 @@ impl Default for LoggingConfig {
 fn default_bind() -> String {
     "0.0.0.0:8080".into()
 }
+fn default_sql_dir() -> PathBuf {
+    // Match the Java default (`sqlms.saved-queries-dir: ./templates/`) so a
+    // Java operator's tree is discovered without them setting `sql_dir:`.
+    PathBuf::from("./templates/")
+}
 fn default_max_body() -> usize {
     1_048_576
 }
@@ -129,8 +152,16 @@ impl Config {
     }
 
     pub fn from_yaml_str(text: &str) -> Result<Self, ResqlError> {
-        let cfg: Config = serde_yaml_ng::from_str(text)
+        // 1. Parse to a raw Value tree.
+        let raw: serde_yaml_ng::Value = serde_yaml_ng::from_str(text)
             .map_err(|e| ResqlError::Internal(format!("invalid config YAML: {e}")))?;
+        // 2. Run the Java-compat preprocessor. This rewrites the Value tree
+        //    into the Rust canonical shape and collects diagnostics.
+        let (normalized, diags) = preprocess(raw);
+        // 3. Deserialize the normalized shape into the Config struct.
+        let mut cfg: Config = serde_yaml_ng::from_value(normalized)
+            .map_err(|e| ResqlError::Internal(format!("invalid config YAML: {e}")))?;
+        cfg.compat_diagnostics = diags;
         cfg.validate()?;
         Ok(cfg)
     }
@@ -144,9 +175,16 @@ impl Config {
                     ds.name
                 )));
             }
-            if !ds.username.is_empty() && ds.password_env.is_empty() {
+            let has_plaintext = ds.password.as_deref().is_some_and(|s| !s.is_empty());
+            if has_plaintext && !ds.password_env.is_empty() {
                 return Err(ResqlError::Internal(format!(
-                    "datasource '{}' sets username but no password_env — refusing to start with an unauthenticated connection",
+                    "datasource '{}' sets BOTH `password` (plaintext) and `password_env`; use exactly one",
+                    ds.name
+                )));
+            }
+            if !ds.username.is_empty() && ds.password_env.is_empty() && !has_plaintext {
+                return Err(ResqlError::Internal(format!(
+                    "datasource '{}' sets username but no password / password_env — refusing to start with an unauthenticated connection",
                     ds.name
                 )));
             }
@@ -164,6 +202,13 @@ impl Config {
                 )));
             }
         }
+        if let Some(ref ds_name) = self.default_datasource {
+            if !self.datasources.iter().any(|d| &d.name == ds_name) {
+                return Err(ResqlError::Internal(format!(
+                    "default_datasource '{ds_name}' is not in datasources"
+                )));
+            }
+        }
         Ok(())
     }
 
@@ -177,19 +222,25 @@ impl Config {
 }
 
 impl DatasourceConfig {
-    /// Return the URL with the password from env interpolated in the userinfo
-    /// section, if password_env is set. The URL is returned unchanged if
-    /// password_env is empty.
+    /// Return the URL with the password interpolated in the userinfo section.
+    /// Prefers `password_env` (Rust-canonical, env-var indirection); falls
+    /// back to the plaintext `password` field if only that is set (Java-compat
+    /// shape). If neither is set, returns the URL unchanged.
     pub fn resolved_url(&self) -> Result<String, ResqlError> {
-        if self.password_env.is_empty() {
+        let (pw, source) = if !self.password_env.is_empty() {
+            let value = std::env::var(&self.password_env).map_err(|_| {
+                ResqlError::Internal(format!(
+                    "env var {} referenced by datasource '{}' is not set",
+                    self.password_env, self.name
+                ))
+            })?;
+            (value, "password_env")
+        } else if let Some(plain) = self.password.as_deref().filter(|s| !s.is_empty()) {
+            (plain.to_string(), "password")
+        } else {
             return Ok(self.url.clone());
-        }
-        let pw = std::env::var(&self.password_env).map_err(|_| {
-            ResqlError::Internal(format!(
-                "env var {} referenced by datasource '{}' is not set",
-                self.password_env, self.name
-            ))
-        })?;
+        };
+        let _ = source; // named for readability, no runtime effect
         Ok(inject_userinfo(&self.url, &self.username, &pw))
     }
 }
@@ -256,7 +307,7 @@ datasources:
     username: u
 "#;
         let err = Config::from_yaml_str(yaml).unwrap_err();
-        assert!(err.to_string().contains("no password_env"));
+        assert!(err.to_string().contains("no password"), "err = {err:?}");
     }
 
     #[test]

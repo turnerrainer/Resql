@@ -1,0 +1,8 @@
+{
+  "_comment": "Structural reference for GET /healthz — matches Java DTOHeartBeatInfo (5 fields). Values are placeholders. Rust adds `status:\"UP\"` (see DIV-002 in DIVERGENCES.md). Java clients using JSONAssert LENIENT mode accept both forms.",
+  "appName": "rig-sqlms",
+  "version": "v1.0.0",
+  "packagingTime": 1590762565458,
+  "appStartTime": 1700000000000,
+  "serverTime": 1700000001234
+}

@@ -1,0 +1,10 @@
+[
+  {
+    "_comment": "Structural reference for POST/GET /{project}/{query} 200 response — array of row-objects with snake_case DB columns rewritten to camelCase.",
+    "id": -1,
+    "login": "admin",
+    "email": "admin@example.com",
+    "passwordHash": "$2a$12$...",
+    "createdAt": "2021-11-26T14:52:32.748+00:00"
+  }
+]
