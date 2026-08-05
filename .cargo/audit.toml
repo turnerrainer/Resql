@@ -14,6 +14,21 @@ ignore = [
     # sqlx-sqlite show up). No runtime attack surface. Re-audit if the
     # mysql backend is ever enabled (see tasks/backlog/005-mysql-driver-optional.md).
     "RUSTSEC-2023-0071",
+
+    # RUSTSEC-2026-0235 — rkyv archive validation OOB read on Rc/Arc.
+    # `rkyv` 0.7.46 is a transitive of `rust_decimal 1.42.1` (via
+    # rust_decimal's default features), itself pulled in by our
+    # `sqlx = { features = [..., "rust_decimal"] }`. The vulnerability
+    # requires deserialising untrusted rkyv-serialised archives — a
+    # code path Resql never exercises at runtime. `cargo tree -i rkyv`
+    # reports nothing (rkyv symbols are optimised out when the
+    # rust_decimal rkyv feature isn't used). No upstream fix as of
+    # 2026-08-05: rust_decimal 1.42.1 is the latest release, and
+    # rkyv 0.7.x has no patched release for this advisory.
+    # Re-audit when either (a) rust_decimal drops the default rkyv
+    # feature, or (b) rkyv 0.7.x publishes a fix, or (c) rust_decimal
+    # ships a version that pulls rkyv 0.8+.
+    "RUSTSEC-2026-0235",
 ]
 
 [output]
