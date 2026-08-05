@@ -42,14 +42,12 @@ async fn healthz_response_keys_match_java_reference() {
         assert_eq!(
             expected_value.is_number(),
             got.is_number(),
-            "key `{key}`: expected number/{}, got {got}",
-            expected_value
+            "key `{key}`: expected number/{expected_value}, got {got}"
         );
         assert_eq!(
             expected_value.is_string(),
             got.is_string(),
-            "key `{key}`: expected string/{}, got {got}",
-            expected_value
+            "key `{key}`: expected string/{expected_value}, got {got}"
         );
     }
     // Documented additive divergence — see DIV-002.
