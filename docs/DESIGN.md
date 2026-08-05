@@ -1,6 +1,6 @@
 # DESIGN — Resql
 
-**Status:** Landed with 0.1.0-alpha.1.
+**Status:** Landed with 0.1.0-alpha.2.
 **Owner:** Rainer Türner.
 **Superseded parts:** None yet.
 
@@ -143,8 +143,8 @@ Per DEV-REQUIREMENTS §3:
 - **No line-coverage chasing**. Tests exist to catch known bugs and to seal seams.
 - **Postgres integration tests** are open work (task 006) — CI runs SQLite-backed integration tests only right now.
 
-Test counts (0.1.0-alpha.1): 49 unit + 28 integration = 77 passing.
+Test counts (0.1.0-alpha.2): 49 unit + 28 integration = 77 passing.
 
 ## 10. Deviations from DEV-REQUIREMENTS
 
-None in scope for 0.1.0-alpha.1.
+None in scope for 0.1.0-alpha.2.

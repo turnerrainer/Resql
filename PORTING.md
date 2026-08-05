@@ -197,7 +197,7 @@ WARN field="userIPHeaderName" `userIPHeaderName` (Java) has no target equivalent
 WARN field="headers.contentSecurityPolicy" `headers.contentSecurityPolicy` (Java) has no target equivalent yet; header will not be emitted. See DIVERGENCES.md
 INFO field="datasources[test_db_1].driverClassName" `driverClassName: org.h2.Driver` accepted for compat; driver is derived from URL scheme in the Rust target
 WARN field="datasources[test_db_1].password" datasource 'test_db_1' uses plaintext `password:` (Java shape). The Rust target prefers `password_env: <ENV_VAR_NAME>`. Plaintext accepted for compatibility. See DIVERGENCES.md.
-INFO version="0.1.0-alpha.1" config="/app/application.yml" bind="0.0.0.0:8082" sql_dir="./templates/" datasources=1 starting Resql
+INFO version="0.1.0-alpha.2" config="/app/application.yml" bind="0.0.0.0:8082" sql_dir="./templates/" datasources=1 starting Resql
 INFO endpoints=12 datasources=1 app state ready
 INFO addr=0.0.0.0:8082 listening
 ```

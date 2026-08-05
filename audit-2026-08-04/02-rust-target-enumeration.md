@@ -127,7 +127,7 @@ Shape (camelCase serde rename):
 ```json
 {
   "appName": "resql",
-  "version": "0.1.0-alpha.1",
+  "version": "0.1.0-alpha.2",
   "appStartTime": 1700000000000,
   "serverTime": 1700000001234,
   "status": "UP"

@@ -9,7 +9,7 @@ Use one of the two officially supported paths:
 **Docker** (recommended):
 
 ```bash
-docker pull turnerrainer/resql:0.1.0-alpha.1
+docker pull turnerrainer/resql:0.1.0-alpha.2
 ```
 
 **From source** (Rust 1.88+):
@@ -25,7 +25,7 @@ The built binary is at `target/release/resql`.
 ## 2. Run the demo
 
 ```bash
-docker run --rm -p 8080:8080 turnerrainer/resql:0.1.0-alpha.1
+docker run --rm -p 8080:8080 turnerrainer/resql:0.1.0-alpha.2
 ```
 
 From source:
@@ -41,7 +41,7 @@ see multi-database routing without any config.
 
 ```bash
 curl http://localhost:8080/health
-# {"appName":"resql","version":"0.1.0-alpha.1","appStartTime":..., "serverTime":..., "status":"UP"}
+# {"appName":"resql","version":"0.1.0-alpha.2","appStartTime":..., "serverTime":..., "status":"UP"}
 
 curl http://localhost:8080/datasources
 # [{"name":"audit","url":"sqlite::memory:","driver":"sqlite"},
@@ -84,7 +84,7 @@ docker run --rm -p 8080:8080 \
   -v "$PWD/mysql:/app/sql:ro" \
   -v "$PWD/resql.yaml:/app/resql.yaml:ro" \
   -e USERS_DB_PASSWORD="secret" \
-  turnerrainer/resql:0.1.0-alpha.1
+  turnerrainer/resql:0.1.0-alpha.2
 ```
 
 Where `resql.yaml` (see [Configuration](./configuration.md) for the full
