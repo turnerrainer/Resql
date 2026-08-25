@@ -6,8 +6,10 @@
 pub mod config;
 pub mod config_compat;
 pub mod db;
+pub mod declaration;
 pub mod error;
 pub mod health;
 pub mod loader;
+pub mod openapi;
 pub mod query;
 pub mod server;

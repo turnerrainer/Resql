@@ -1,0 +1,231 @@
+{
+    "info": {
+        "_postman_id": "b3e7f5aa-0000-4f3b-9b19-000000000002",
+        "name": "Resql — demo endpoints",
+        "description": "Hits every route baked into the shipped Docker image. Uses the `baseUrl` environment variable (defaults to http://localhost:8080). Regenerate from `/openapi.json` — see `postman/README.md`.",
+        "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+    },
+    "item": [
+        {
+            "name": "Meta",
+            "description": "Health, datasource listing, generated OpenAPI spec.",
+            "item": [
+                {
+                    "name": "GET /health",
+                    "request": {
+                        "method": "GET",
+                        "header": [],
+                        "url": {
+                            "raw": "{{baseUrl}}/health",
+                            "host": ["{{baseUrl}}"],
+                            "path": ["health"]
+                        }
+                    }
+                },
+                {
+                    "name": "GET /datasources",
+                    "request": {
+                        "method": "GET",
+                        "header": [],
+                        "url": {
+                            "raw": "{{baseUrl}}/datasources",
+                            "host": ["{{baseUrl}}"],
+                            "path": ["datasources"]
+                        }
+                    }
+                },
+                {
+                    "name": "GET /openapi.json",
+                    "request": {
+                        "method": "GET",
+                        "header": [],
+                        "url": {
+                            "raw": "{{baseUrl}}/openapi.json",
+                            "host": ["{{baseUrl}}"],
+                            "path": ["openapi.json"]
+                        }
+                    }
+                }
+            ]
+        },
+        {
+            "name": "users",
+            "description": "Endpoints backed by the `users` datasource.",
+            "item": [
+                {
+                    "name": "GET /users/hello",
+                    "request": {
+                        "method": "GET",
+                        "header": [],
+                        "url": {
+                            "raw": "{{baseUrl}}/users/hello?name=world",
+                            "host": ["{{baseUrl}}"],
+                            "path": ["users", "hello"],
+                            "query": [
+                                {
+                                    "key": "name",
+                                    "value": "world",
+                                    "description": "Required. Whom to greet."
+                                }
+                            ]
+                        }
+                    }
+                },
+                {
+                    "name": "POST /users/echo",
+                    "request": {
+                        "method": "POST",
+                        "header": [
+                            {"key": "Content-Type", "value": "application/json"}
+                        ],
+                        "body": {
+                            "mode": "raw",
+                            "raw": "{\n    \"msg\": \"pong\"\n}"
+                        },
+                        "url": {
+                            "raw": "{{baseUrl}}/users/echo",
+                            "host": ["{{baseUrl}}"],
+                            "path": ["users", "echo"]
+                        }
+                    }
+                },
+                {
+                    "name": "POST /users/echo/batch",
+                    "request": {
+                        "method": "POST",
+                        "header": [
+                            {"key": "Content-Type", "value": "application/json"}
+                        ],
+                        "body": {
+                            "mode": "raw",
+                            "raw": "{\n    \"queries\": [\n        { \"msg\": \"first\"  },\n        { \"msg\": \"second\" },\n        { \"msg\": \"third\"  }\n    ]\n}"
+                        },
+                        "url": {
+                            "raw": "{{baseUrl}}/users/echo/batch",
+                            "host": ["{{baseUrl}}"],
+                            "path": ["users", "echo", "batch"]
+                        }
+                    }
+                }
+            ]
+        },
+        {
+            "name": "audit",
+            "description": "Endpoints backed by the `audit` datasource — different backend from `/users/*` on the demo image, so the responses prove multi-database routing.",
+            "item": [
+                {
+                    "name": "GET /audit/tail",
+                    "request": {
+                        "method": "GET",
+                        "header": [],
+                        "url": {
+                            "raw": "{{baseUrl}}/audit/tail?n=42",
+                            "host": ["{{baseUrl}}"],
+                            "path": ["audit", "tail"],
+                            "query": [
+                                {
+                                    "key": "n",
+                                    "value": "42",
+                                    "description": "Required. Row number (declared as `integer` — Resql coerces the query-string value)."
+                                }
+                            ]
+                        }
+                    }
+                },
+                {
+                    "name": "POST /audit/write",
+                    "request": {
+                        "method": "POST",
+                        "header": [
+                            {"key": "Content-Type", "value": "application/json"}
+                        ],
+                        "body": {
+                            "mode": "raw",
+                            "raw": "{\n    \"actor\":  \"claude\",\n    \"action\": \"created\"\n}"
+                        },
+                        "url": {
+                            "raw": "{{baseUrl}}/audit/write",
+                            "host": ["{{baseUrl}}"],
+                            "path": ["audit", "write"]
+                        }
+                    }
+                },
+                {
+                    "name": "POST /audit/write/batch",
+                    "request": {
+                        "method": "POST",
+                        "header": [
+                            {"key": "Content-Type", "value": "application/json"}
+                        ],
+                        "body": {
+                            "mode": "raw",
+                            "raw": "{\n    \"queries\": [\n        { \"actor\": \"claude\", \"action\": \"created\" },\n        { \"actor\": \"rainer\", \"action\": \"updated\" }\n    ]\n}"
+                        },
+                        "url": {
+                            "raw": "{{baseUrl}}/audit/write/batch",
+                            "host": ["{{baseUrl}}"],
+                            "path": ["audit", "write", "batch"]
+                        }
+                    }
+                }
+            ]
+        },
+        {
+            "name": "Declaration behaviour (task 008)",
+            "description": "Requests exercising the new declaration-driven validation. Import, run, watch each response — this folder is the fastest way to feel the semantics.",
+            "item": [
+                {
+                    "name": "POST /users/echo — missing required (400 InvalidDataAccessApiUsageException)",
+                    "request": {
+                        "method": "POST",
+                        "header": [
+                            {"key": "Content-Type", "value": "application/json"}
+                        ],
+                        "body": {
+                            "mode": "raw",
+                            "raw": "{}"
+                        },
+                        "url": {
+                            "raw": "{{baseUrl}}/users/echo",
+                            "host": ["{{baseUrl}}"],
+                            "path": ["users", "echo"]
+                        }
+                    }
+                },
+                {
+                    "name": "POST /users/echo — unknown key (400 UnknownParameterException)",
+                    "request": {
+                        "method": "POST",
+                        "header": [
+                            {"key": "Content-Type", "value": "application/json"}
+                        ],
+                        "body": {
+                            "mode": "raw",
+                            "raw": "{\n    \"msg\":   \"pong\",\n    \"extra\": \"not declared\"\n}"
+                        },
+                        "url": {
+                            "raw": "{{baseUrl}}/users/echo",
+                            "host": ["{{baseUrl}}"],
+                            "path": ["users", "echo"]
+                        }
+                    }
+                },
+                {
+                    "name": "GET /audit/tail — wrong type (400 InvalidParameterTypeException)",
+                    "request": {
+                        "method": "GET",
+                        "header": [],
+                        "url": {
+                            "raw": "{{baseUrl}}/audit/tail?n=not-an-int",
+                            "host": ["{{baseUrl}}"],
+                            "path": ["audit", "tail"],
+                            "query": [
+                                {"key": "n", "value": "not-an-int"}
+                            ]
+                        }
+                    }
+                }
+            ]
+        }
+    ]
+}

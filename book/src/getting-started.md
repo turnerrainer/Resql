@@ -9,7 +9,7 @@ Use one of the two officially supported paths:
 **Docker** (recommended):
 
 ```bash
-docker pull turnerrainer/resql:0.1.0-alpha.2
+docker pull turnerrainer/resql:0.1.0-alpha.3
 ```
 
 **From source** (Rust 1.88+):
@@ -25,7 +25,7 @@ The built binary is at `target/release/resql`.
 ## 2. Run the demo
 
 ```bash
-docker run --rm -p 8080:8080 turnerrainer/resql:0.1.0-alpha.2
+docker run --rm -p 8080:8080 turnerrainer/resql:0.1.0-alpha.3
 ```
 
 From source:
@@ -41,11 +41,14 @@ see multi-database routing without any config.
 
 ```bash
 curl http://localhost:8080/health
-# {"appName":"resql","version":"0.1.0-alpha.2","appStartTime":..., "serverTime":..., "status":"UP"}
+# {"appName":"resql","version":"v0.1.0","packagingTime":0,"appStartTime":..., "serverTime":..., "status":"UP"}
 
 curl http://localhost:8080/datasources
-# [{"name":"audit","url":"sqlite::memory:","driver":"sqlite"},
-#  {"name":"users","url":"sqlite::memory:","driver":"sqlite"}]
+# [{"name":"audit","jdbcUrl":"sqlite::memory:","username":"","driverClassName":"org.sqlite.JDBC"},
+#  {"name":"users","jdbcUrl":"sqlite::memory:","username":"","driverClassName":"org.sqlite.JDBC"}]
+
+curl http://localhost:8080/openapi.json | jq '.paths | keys'
+# ["/audit/tail","/audit/write","/audit/write/batch","/users/echo","/users/echo/batch","/users/hello"]
 
 # Hits the users datasource (URL project = users):
 curl "http://localhost:8080/users/hello?name=world"
@@ -74,8 +77,29 @@ endpoints you'll want to mount a directory over `/app/sql`.
 Create a file `./mysql/users/GET/find-by-login.sql`:
 
 ```sql
-SELECT id, email FROM users WHERE login = :login;
+/*
+description: Find users by login, optional status filter.
+params:
+  login:
+    type: string
+    required: true
+  status:
+    type: string
+    required: false
+returns:
+  - name: id
+    type: integer
+    nullable: false
+  - name: email
+    type: string
+*/
+SELECT id, email FROM users
+WHERE login = :login
+  AND (:status IS NULL OR status = :status);
 ```
+
+Every `.sql` file must open with a declaration block — see
+[Declarations & OpenAPI](./declarations.md).
 
 Run with your directory mounted and a Postgres datasource wired up:
 
@@ -84,7 +108,7 @@ docker run --rm -p 8080:8080 \
   -v "$PWD/mysql:/app/sql:ro" \
   -v "$PWD/resql.yaml:/app/resql.yaml:ro" \
   -e USERS_DB_PASSWORD="secret" \
-  turnerrainer/resql:0.1.0-alpha.2
+  turnerrainer/resql:0.1.0-alpha.3
 ```
 
 Where `resql.yaml` (see [Configuration](./configuration.md) for the full

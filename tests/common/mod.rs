@@ -101,7 +101,7 @@ impl TestAppBuilder {
         for (rel, body) in &self.files {
             let path = sql_root.join(rel);
             fs::create_dir_all(path.parent().unwrap()).unwrap();
-            fs::write(path, body).unwrap();
+            fs::write(path, materialise_sql(body)).unwrap();
         }
         if self.files.is_empty() {
             fs::create_dir_all(&sql_root).unwrap();
@@ -168,14 +168,17 @@ impl TestAppBuilder {
             datasources: cfg_datasources,
             cors: resql::config::CorsConfig::default(),
             logging: resql::config::LoggingConfig::default(),
+            openapi: resql::config::OpenApiConfig::default(),
             compat_diagnostics: Vec::new(),
         };
 
+        let spec = resql::openapi::build_spec(&index, &config.openapi);
         let state = AppState {
             config: Arc::new(config),
             index: Arc::new(index),
             registry: Arc::new(registry),
             start: StartTime::now(),
+            openapi: Arc::new(spec),
         };
 
         let router = server::router(state);
@@ -226,4 +229,102 @@ impl TestApp {
     pub fn sql_root(&self) -> &Path {
         &self.sql_root
     }
+}
+
+/// If the test author already wrote a `/* … */` declaration block,
+/// keep the body verbatim. Otherwise, prepend a permissive declaration
+/// inferred from the `:name` occurrences in the SQL — every referenced
+/// param becomes `{ type: string, required: false }`. This lets the
+/// existing integration suites keep short, expressive fixtures while
+/// the production loader still enforces the mandatory declaration
+/// rule (task 008).
+fn materialise_sql(body: &str) -> String {
+    // Detect an already-present block-comment declaration.
+    let trimmed = body.trim_start();
+    if trimmed.starts_with("/*") {
+        return body.to_string();
+    }
+    let names = collect_named_params(body);
+    let mut out = String::from("/*\nparams:\n");
+    if names.is_empty() {
+        out.push_str("  {}\n");
+    } else {
+        for n in &names {
+            out.push_str(&format!("  {n}: {{ type: string, required: false }}\n"));
+        }
+    }
+    out.push_str("*/\n");
+    out.push_str(body);
+    out
+}
+
+/// Very small `:name` scanner mirroring `query::rewrite_named_params`'s
+/// state machine. Duplicates avoided; order preserved.
+fn collect_named_params(sql: &str) -> Vec<String> {
+    let bytes = sql.as_bytes();
+    let n = bytes.len();
+    let mut i = 0usize;
+    let mut out: Vec<String> = Vec::new();
+    while i < n {
+        let c = bytes[i] as char;
+        if c == '-' && i + 1 < n && bytes[i + 1] == b'-' {
+            while i < n && bytes[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+        if c == '/' && i + 1 < n && bytes[i + 1] == b'*' {
+            i += 2;
+            while i + 1 < n && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                i += 1;
+            }
+            if i + 1 < n {
+                i += 2;
+            }
+            continue;
+        }
+        if c == '\'' || c == '"' {
+            let quote = c;
+            i += 1;
+            while i < n {
+                let ch = bytes[i] as char;
+                i += 1;
+                if ch == quote {
+                    if i < n && bytes[i] == quote as u8 {
+                        i += 1;
+                        continue;
+                    }
+                    break;
+                }
+            }
+            continue;
+        }
+        if c == ':' && i + 1 < n && bytes[i + 1] == b':' {
+            i += 2;
+            continue;
+        }
+        if c == ':' && i + 1 < n {
+            let nx = bytes[i + 1] as char;
+            if nx.is_ascii_alphabetic() || nx == '_' {
+                let start = i + 1;
+                let mut end = start;
+                while end < n {
+                    let ch = bytes[end] as char;
+                    if ch.is_ascii_alphanumeric() || ch == '_' {
+                        end += 1;
+                    } else {
+                        break;
+                    }
+                }
+                let name = std::str::from_utf8(&bytes[start..end]).unwrap().to_string();
+                if !out.contains(&name) {
+                    out.push(name);
+                }
+                i = end;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    out
 }

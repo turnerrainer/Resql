@@ -15,6 +15,7 @@ use crate::db::{DatasourceRegistry, SharedRegistry};
 use crate::error::ResqlError;
 use crate::health::{self, StartTime};
 use crate::loader::{HttpMethod, QueryIndex};
+use crate::openapi;
 use crate::query;
 
 const DATASOURCE_HEADER: &str = "x-datasource";
@@ -25,6 +26,10 @@ pub struct AppState {
     pub index: Arc<QueryIndex>,
     pub registry: SharedRegistry,
     pub start: StartTime,
+    /// OpenAPI 3.1 spec derived from the loaded QueryIndex at boot.
+    /// Cached because the declaration set is fixed for the process
+    /// lifetime and building it per request would be wasteful.
+    pub openapi: Arc<Value>,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -35,11 +40,16 @@ pub fn router(state: AppState) -> Router {
         .route("/health", get(health_handler))
         .route("/healthz", get(health_handler))
         .route("/datasources", get(list_datasources))
+        .route("/openapi.json", get(openapi_handler))
         .route("/:project/*tail", get(query_get).post(query_post))
         .layer(cors)
         .layer(RequestBodyLimitLayer::new(body_limit))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
+}
+
+async fn openapi_handler(State(state): State<AppState>) -> Json<Value> {
+    Json((*state.openapi).clone())
 }
 
 fn build_cors(allowed: &str) -> CorsLayer {
@@ -170,9 +180,9 @@ async fn dispatch(
         .get(&ds_name)
         .ok_or_else(|| ResqlError::UnknownDataSource(ds_name.clone()))?;
     let rows = if saved.transactional {
-        query::execute_transactional(pool, &saved.sql, &body).await?
+        query::execute_transactional(pool, &saved.sql, &saved.declaration, &body).await?
     } else {
-        query::execute(pool, &saved.sql, &body).await?
+        query::execute(pool, &saved.sql, &saved.declaration, &body).await?
     };
     Ok(Json(json!(rows)))
 }
@@ -203,7 +213,7 @@ async fn dispatch_batch(
         ResqlError::MalformedRequest(format!("batch body must be {{queries: [...]}}: {e}"))
     })?;
 
-    let results = query::execute_batch(pool, &saved.sql, batch.queries).await?;
+    let results = query::execute_batch(pool, &saved.sql, &saved.declaration, batch.queries).await?;
     let all: Vec<Value> = results.into_iter().map(|rows| json!(rows)).collect();
     Ok(Json(Value::Array(all)))
 }
@@ -225,11 +235,13 @@ fn choose_datasource(cfg: &Config, project: &str, headers: &HeaderMap) -> String
 pub async fn init(config: Config) -> Result<AppState, ResqlError> {
     let index = crate::loader::load_dir(&config.sql_dir)?;
     let registry = DatasourceRegistry::connect_all(&config.datasources).await?;
+    let spec = openapi::build_spec(&index, &config.openapi);
     Ok(AppState {
         config: Arc::new(config),
         index: Arc::new(index),
         registry: Arc::new(registry),
         start: StartTime::now(),
+        openapi: Arc::new(spec),
     })
 }
 

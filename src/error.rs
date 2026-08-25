@@ -16,8 +16,28 @@ pub enum ResqlError {
     #[error("No value supplied for the SQL parameter '{0}': No value registered for key '{0}'")]
     MissingParameter(String),
 
+    #[error("Unexpected parameter '{0}' not declared for this endpoint")]
+    UnknownParameter(String),
+
+    #[error("Parameter '{name}' has the wrong type: expected {expected}, got {actual}")]
+    InvalidParameterType {
+        name: String,
+        expected: &'static str,
+        actual: String,
+    },
+
+    #[error("Parameter '{name}' value {value} is not in the allowed set {allowed:?}")]
+    InvalidParameterValue {
+        name: String,
+        value: String,
+        allowed: Vec<String>,
+    },
+
     #[error("Invalid query file '{path}': {reason}")]
     InvalidQuery { path: PathBuf, reason: String },
+
+    #[error("Invalid declaration in '{path}': {reason}")]
+    InvalidDeclaration { path: PathBuf, reason: String },
 
     #[error("Invalid SQL directory '{path}': {reason}")]
     InvalidDirectory { path: PathBuf, reason: String },
@@ -41,7 +61,11 @@ impl ResqlError {
             ResqlError::QueryNotFound(_) => "ResqlRuntimeException",
             ResqlError::UnknownDataSource(_) => "UnknownDataSourceNameException",
             ResqlError::MissingParameter(_) => "InvalidDataAccessApiUsageException",
+            ResqlError::UnknownParameter(_) => "UnknownParameterException",
+            ResqlError::InvalidParameterType { .. } => "InvalidParameterTypeException",
+            ResqlError::InvalidParameterValue { .. } => "InvalidParameterValueException",
             ResqlError::InvalidQuery { .. } => "InvalidQueryException",
+            ResqlError::InvalidDeclaration { .. } => "InvalidDeclarationException",
             ResqlError::InvalidDirectory { .. } => "InvalidDirectoryException",
             ResqlError::SqlExecution(_) => "BadSqlGrammarException",
             ResqlError::BodyTooLarge => "PayloadTooLargeException",

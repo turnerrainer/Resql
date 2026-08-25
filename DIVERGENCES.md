@@ -319,3 +319,65 @@ require re-architecture.
 - **Migration.** Operators intentionally shipping "known broken" SQL files
   (a lint stage in their template repo) must remove them from the tree.
 - **Reversibility.** low.
+
+## DIV-019 — Mandatory per-file declaration block
+
+- **Field / behaviour.** Every `.sql` file must open with a `/* … */`
+  block comment whose body is YAML — naming its parameters, types, and
+  (optionally) return shape. See [`book/src/declarations.md`](book/src/declarations.md).
+- **Source of truth.** Java Resql: no declaration; every `:name` in the
+  SQL is treated as required and typed as string; extras are silently
+  dropped.
+- **Target behaviour.** Rust refuses to boot when any `.sql` file has
+  no declaration block, when the declaration doesn't cover every
+  `:name` in the SQL, or when it declares a param the SQL doesn't
+  reference.
+- **Motivation.** Enables (a) optional params bound as SQL NULL when
+  omitted — fixes [Resql#4](https://github.com/turnerrainer/Resql/issues/4);
+  (b) typed OpenAPI 3.1 spec at `/openapi.json`; (c) request-boundary
+  type validation so garbage payloads never reach the database.
+- **Migration.** Every existing `.sql` file needs a declaration added
+  above the statement. Minimum viable declaration for a file that uses
+  parameters `:a` and `:b`:
+  ```sql
+  /*
+  params:
+    a: { type: string }
+    b: { type: string }
+  */
+  ```
+- **Reversibility.** high — the declaration model is the anchor for
+  OpenAPI + validation; reverting drops both.
+
+## DIV-020 — Unknown request keys rejected
+
+- **Field / behaviour.** An incoming JSON body or query-string key
+  that is not declared in the endpoint's `params:`.
+- **Source of truth.** Java Resql: silently ignored.
+- **Target behaviour.** Rust returns 400 with
+  `error: UnknownParameterException` naming the offending key.
+- **Motivation.** Resql executes the caller's SQL against a real
+  database; silently dropping unknown keys means a caller mistyping
+  `userName` as `user_name` sees an empty result set with no
+  actionable feedback. A 400 with the exact key is easier to debug.
+- **Migration.** Callers that historically piggy-backed extra fields
+  onto Resql requests (e.g. audit trailers) need to move those out
+  of the request body/query, or declare them explicitly in the
+  endpoint's `params:`.
+- **Reversibility.** low.
+
+## DIV-021 — Optional params bind SQL NULL when omitted
+
+- **Field / behaviour.** A `:name` referenced by the SQL whose caller
+  omits the corresponding key.
+- **Source of truth.** Java Resql: 400 with `InvalidDataAccessApiUsageException`.
+- **Target behaviour.** Rust binds SQL NULL for the omitted param when
+  the declaration marks it `required: false`. If the declaration
+  provides a `default:`, that value is bound instead. Required params
+  still error 400 when omitted.
+- **Motivation.** Fixes [Resql#4](https://github.com/turnerrainer/Resql/issues/4)
+  — the original API forced callers of any endpoint with N optional
+  filters to send N explicit `null`s on every call.
+- **Migration.** Callers sending explicit `null` for optional filters
+  keep working (JSON `null` for an optional still binds NULL).
+- **Reversibility.** low.

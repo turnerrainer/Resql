@@ -28,8 +28,11 @@ only `413` (body too large) and `500` (unhandled internal) sit outside.
 |---|---|---|
 | `ResqlRuntimeException` | The URL doesn't match any loaded SQL file. | 400 |
 | `UnknownDataSourceNameException` | The resolved datasource name is not in config. | 400 |
-| `InvalidDataAccessApiUsageException` | A `:name` in the SQL had no matching JSON key. | 400 |
+| `InvalidDataAccessApiUsageException` | A required declared param is missing (or JSON `null`) from the request. | 400 |
+| `UnknownParameterException` | Request carries a key not declared in the endpoint's `params:`. | 400 |
+| `InvalidParameterTypeException` | Request value doesn't match the declared type (or GET query-string coercion failed). | 400 |
 | `InvalidQueryException` | Malformed SQL file caught at load (empty file, unreadable). | Startup fails |
+| `InvalidDeclarationException` | SQL file has no declaration fence, malformed YAML, or declared/referenced params disagree. | Startup fails |
 | `InvalidDirectoryException` | `sql_dir` missing, not a directory, or unreadable. | Startup fails |
 | `BadSqlGrammarException` | SQL execution failed (syntax error, unknown table, type mismatch). | 400 |
 | `MalformedRequestException` | Body is not valid JSON, or batch body has no `queries` field. | 400 |
@@ -44,6 +47,9 @@ does **not** attempt to run in a degraded state.
 - Missing / invalid `sql_dir`
 - Duplicate SQL endpoints
 - Empty SQL file
+- SQL file with no declaration fence
+- Declaration references params the SQL doesn't use, or vice versa
+- Malformed YAML inside the declaration fence
 - Duplicate datasource `name`
 - Datasource with `username` but no `password_env`
 - `password_env` naming an unset environment variable

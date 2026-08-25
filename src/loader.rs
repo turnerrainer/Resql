@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use crate::declaration::{self, Declaration};
 use crate::error::ResqlError;
+use crate::query::{rewrite_named_params, Dialect};
 
 /// A single SQL file loaded from disk, keyed by its endpoint identity.
 #[derive(Debug, Clone)]
@@ -11,6 +13,8 @@ pub struct SavedQuery {
     /// Path segments after the METHOD directory, joined by '/', WITHOUT leading slash.
     /// Example: file `sql/crm/GET/users/find.sql` → `path = "users/find"`.
     pub path: String,
+    /// SQL body with the leading declaration fence stripped. This is
+    /// what `query::execute*` binds and executes against.
     pub sql: String,
     pub source_file: PathBuf,
     /// True when the SQL file's leading comment block contains
@@ -19,6 +23,9 @@ pub struct SavedQuery {
     /// rollback on any error). Batch endpoints are always transactional
     /// regardless of this flag — see `query::execute_batch`.
     pub transactional: bool,
+    /// Parsed declaration (task 008). Mandatory — every SQL file must
+    /// carry one; loader rejects files that don't.
+    pub declaration: Declaration,
 }
 
 /// Scan the leading comment lines of `sql` for a `-- @transactional`
@@ -92,7 +99,7 @@ impl QueryIndex {
         self.inner.values()
     }
 
-    fn insert(&mut self, q: SavedQuery) -> Result<(), ResqlError> {
+    pub(crate) fn insert(&mut self, q: SavedQuery) -> Result<(), ResqlError> {
         let key = (q.method, normalise(&q.project, &q.path));
         if let Some(existing) = self.inner.get(&key) {
             return Err(ResqlError::InvalidQuery {
@@ -200,16 +207,29 @@ fn walk_method_dir(
                 reason: "empty relative path".into(),
             });
         }
-        let sql = std::fs::read_to_string(&entry).map_err(|e| ResqlError::InvalidQuery {
+        let raw = std::fs::read_to_string(&entry).map_err(|e| ResqlError::InvalidQuery {
             path: entry.clone(),
             reason: format!("cannot read: {e}"),
         })?;
-        if sql.trim().is_empty() {
+        if raw.trim().is_empty() {
             return Err(ResqlError::InvalidQuery {
                 path: entry.clone(),
                 reason: "file is empty".into(),
             });
         }
+        let (declaration, sql) = declaration::parse(&raw)
+            .map_err(|reason| declaration::invalid(entry.clone(), reason))?;
+        if sql.trim().is_empty() {
+            return Err(ResqlError::InvalidQuery {
+                path: entry.clone(),
+                reason: "file has no SQL after declaration fence".into(),
+            });
+        }
+        // Cross-check declared params vs `:name` occurrences. Dialect
+        // doesn't affect the set of names extracted, so pick one.
+        let (_, referenced) = rewrite_named_params(&sql, Dialect::Postgres);
+        declaration::validate_against_sql(&declaration, &referenced)
+            .map_err(|reason| declaration::invalid(entry.clone(), reason))?;
         let transactional = parse_transactional_marker(&sql);
         index.insert(SavedQuery {
             project: project.to_string(),
@@ -218,6 +238,7 @@ fn walk_method_dir(
             sql,
             source_file: entry,
             transactional,
+            declaration,
         })?;
     }
     Ok(())
@@ -238,6 +259,7 @@ fn read_dir_sorted(dir: &Path) -> Result<Vec<PathBuf>, ResqlError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
     use std::fs;
     use tempfile::TempDir;
 
@@ -245,6 +267,26 @@ mod tests {
         let p = root.join(rel);
         fs::create_dir_all(p.parent().unwrap()).unwrap();
         fs::write(p, body).unwrap();
+    }
+
+    /// Write an SQL file with an auto-inferred permissive declaration
+    /// (every `:name` in the body → `{ type: string, required: false }`).
+    /// Keeps loader-tests focused on layout rules without repeating
+    /// declaration boilerplate in every fixture.
+    fn write_declared(root: &Path, rel: &str, sql_body: &str) {
+        let (_, referenced) = rewrite_named_params(sql_body, Dialect::Postgres);
+        let names: BTreeSet<String> = referenced.into_iter().collect();
+        let mut fence = String::from("/*\nparams:\n");
+        if names.is_empty() {
+            fence.push_str("  {}\n");
+        } else {
+            for n in &names {
+                fence.push_str(&format!("  {n}: {{ type: string }}\n"));
+            }
+        }
+        fence.push_str("*/\n");
+        fence.push_str(sql_body);
+        write(root, rel, &fence);
     }
 
     #[test]
@@ -263,8 +305,8 @@ mod tests {
     #[test]
     fn simple_layout_produces_expected_keys() {
         let td = TempDir::new().unwrap();
-        write(td.path(), "crm/GET/users/find.sql", "SELECT 1");
-        write(td.path(), "crm/POST/users/add.sql", "SELECT 2");
+        write_declared(td.path(), "crm/GET/users/find.sql", "SELECT 1");
+        write_declared(td.path(), "crm/POST/users/add.sql", "SELECT 2");
         let idx = load_dir(td.path()).unwrap();
         assert_eq!(idx.len(), 2);
         assert!(idx.get(HttpMethod::Get, "crm", "users/find").is_some());
@@ -274,7 +316,7 @@ mod tests {
     #[test]
     fn lookup_is_case_insensitive() {
         let td = TempDir::new().unwrap();
-        write(td.path(), "crm/GET/Users/Find.sql", "SELECT 1");
+        write_declared(td.path(), "crm/GET/Users/Find.sql", "SELECT 1");
         let idx = load_dir(td.path()).unwrap();
         assert!(idx.get(HttpMethod::Get, "CRM", "users/FIND").is_some());
         assert!(idx.get(HttpMethod::Get, "crm", "users/find").is_some());
@@ -283,7 +325,7 @@ mod tests {
     #[test]
     fn unknown_method_dir_is_ignored() {
         let td = TempDir::new().unwrap();
-        write(td.path(), "crm/PUT/x.sql", "SELECT 1");
+        write_declared(td.path(), "crm/PUT/x.sql", "SELECT 1");
         let idx = load_dir(td.path()).unwrap();
         assert!(idx.is_empty());
     }
@@ -305,10 +347,51 @@ mod tests {
     }
 
     #[test]
+    fn missing_declaration_rejected() {
+        let td = TempDir::new().unwrap();
+        write(td.path(), "crm/GET/x.sql", "SELECT 1;\n");
+        let err = load_dir(td.path()).unwrap_err();
+        assert!(
+            matches!(err, ResqlError::InvalidDeclaration { .. }),
+            "err = {err:?}"
+        );
+    }
+
+    #[test]
+    fn declaration_referencing_wrong_param_rejected() {
+        let td = TempDir::new().unwrap();
+        write(
+            td.path(),
+            "crm/GET/x.sql",
+            "/*\nparams:\n  other: { type: string }\n*/\nSELECT :id;\n",
+        );
+        let err = load_dir(td.path()).unwrap_err();
+        assert!(
+            matches!(err, ResqlError::InvalidDeclaration { .. }),
+            "err = {err:?}"
+        );
+    }
+
+    #[test]
+    fn declaration_with_orphan_param_rejected() {
+        let td = TempDir::new().unwrap();
+        write(
+            td.path(),
+            "crm/GET/x.sql",
+            "/*\nparams:\n  id: { type: string }\n  ghost: { type: string }\n*/\nSELECT :id;\n",
+        );
+        let err = load_dir(td.path()).unwrap_err();
+        assert!(
+            matches!(err, ResqlError::InvalidDeclaration { .. }),
+            "err = {err:?}"
+        );
+    }
+
+    #[test]
     fn duplicate_endpoint_rejected() {
         let td = TempDir::new().unwrap();
-        write(td.path(), "crm/GET/x.sql", "SELECT 1");
-        write(td.path(), "crm/GET/X.sql", "SELECT 2");
+        write_declared(td.path(), "crm/GET/x.sql", "SELECT 1");
+        write_declared(td.path(), "crm/GET/X.sql", "SELECT 2");
         let err = load_dir(td.path()).unwrap_err();
         assert!(matches!(err, ResqlError::InvalidQuery { .. }));
     }
@@ -316,7 +399,7 @@ mod tests {
     #[test]
     fn nested_subdirectories_flatten_into_path() {
         let td = TempDir::new().unwrap();
-        write(td.path(), "crm/GET/a/b/c/deep.sql", "SELECT 1");
+        write_declared(td.path(), "crm/GET/a/b/c/deep.sql", "SELECT 1");
         let idx = load_dir(td.path()).unwrap();
         assert!(idx.get(HttpMethod::Get, "crm", "a/b/c/deep").is_some());
     }
@@ -324,7 +407,7 @@ mod tests {
     #[test]
     fn transactional_marker_default_off() {
         let td = TempDir::new().unwrap();
-        write(td.path(), "crm/POST/x.sql", "INSERT INTO t VALUES (:x)");
+        write_declared(td.path(), "crm/POST/x.sql", "INSERT INTO t VALUES (:x)");
         let idx = load_dir(td.path()).unwrap();
         let q = idx.get(HttpMethod::Post, "crm", "x").unwrap();
         assert!(!q.transactional);
@@ -365,7 +448,7 @@ mod tests {
         write(
             td.path(),
             "crm/POST/tx.sql",
-            "-- @transactional\nINSERT INTO t VALUES (:x)",
+            "/*\nparams:\n  x: { type: string }\n*/\n-- @transactional\nINSERT INTO t VALUES (:x)",
         );
         let idx = load_dir(td.path()).unwrap();
         assert!(

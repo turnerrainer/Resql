@@ -6,6 +6,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0-alpha.3] - 2026-08-26
+
+### Added
+- **Closed-set input validation via `enum:` on declared params.** Any `DeclaredParam` can carry a JSON-Schema-style `enum: [...]` list; values outside the set are rejected at the request boundary with 400 `InvalidParameterValueException` before any SQL binding. Enum entries are validated at boot against the declared `type`; `default:` (when set) must be in the enum or `null`; empty lists are rejected at boot. The set is echoed in the OpenAPI spec as JSON Schema's `enum` keyword so code-gen clients see the true type. Closes the input-side security half of [Resql#3](https://github.com/turnerrainer/Resql/issues/3) — no SQL is rewritten; the DB never sees an out-of-set value.
+
+### Fixed
+- **Timestamp serialisation is now ISO 8601 / RFC 3339 by default.** Postgres `TIMESTAMP` columns now render as `2026-01-01T10:20:30` (previously `2026-01-01 10:20:30` — space separator, neither ISO 8601 nor RFC 3339); `TIMESTAMPTZ` columns at UTC render as `2026-01-01T10:20:30Z` (previously `2026-01-01T10:20:30+00:00`). Matches Jackson / JVM Resql defaults. Fixes [Resql#3](https://github.com/turnerrainer/Resql/issues/3).
+
+### Added — mandatory declaration section + OpenAPI 3.1 (task 008)
+
+- **Every `.sql` file now opens with a `/* … */` YAML declaration block** naming its parameters, their types, whether each is required, and (optionally) the returned row shape. The block body is plain YAML — no per-line prefix, so authors can paste YAML from any editor. Boot refuses any file without a declaration, any declaration that fails to cover every `:name` in the SQL, and any orphan declared params. See `book/src/declarations.md`.
+- **Optional parameters may be omitted from requests** — the SQL sees SQL NULL for the missing placeholder (or a declared `default:`). Fixes [Resql#4](https://github.com/turnerrainer/Resql/issues/4): callers no longer have to send explicit `null` for every optional filter on every request.
+- **Type-safe request validation.** Requests now hit three declaration-driven boundaries before touching the DB: unknown key → 400 `UnknownParameterException`; wrong type → 400 `InvalidParameterTypeException`; required missing → existing 400 `InvalidDataAccessApiUsageException`. GET query-string values are coerced to the declared type at the request boundary.
+- **OpenAPI 3.1 spec exposed at `/openapi.json`.** Generated at boot from every declaration; paths and operations are alpha-sorted so a diff on the file is meaningful across restarts. POST endpoints get an auto-emitted `/…/batch` variant. Customise `info` and `servers` via a new optional `openapi:` block in `resql.yaml`.
+- **Type set:** `string`, `integer`, `number`, `boolean`, `array`, `object`, `date`, `datetime`, `uuid`. Semantic types (`date`, `datetime`, `uuid`) emit as `string` with the standard OpenAPI `format`.
+- New `book/src/declarations.md` chapter; `DIVERGENCES.md` entries DIV-019 through DIV-021 documenting the intentional break from JVM Resql's permissive request handling.
+
+### Changed
+
+- **Breaking.** All existing `.sql` files require a declaration to load. Minimum viable declaration for a file using `:a` and `:b`: `/*\nparams:\n  a: { type: string }\n  b: { type: string }\n*/`. Extras (name matches, default values, returns schema) are recommended.
+- `query::execute`, `query::execute_transactional`, and `query::execute_batch` now take an extra `&Declaration` argument; the runtime validates every request map against it before binding.
+
 ## [0.1.0-alpha.2] - 2026-08-05
 
 ### Added — batch atomicity and array binding (task 007)
@@ -82,6 +104,7 @@ Spring Boot service. Interface-compatible with the original for the SQL-file-to-
 - Container image signed with cosign keyless via GHA OIDC.
 - Trivy HIGH/CRITICAL scan gates image signing.
 
-[Unreleased]: https://github.com/turnerrainer/Resql/compare/v0.1.0-alpha.2...HEAD
+[Unreleased]: https://github.com/turnerrainer/Resql/compare/v0.1.0-alpha.3...HEAD
+[0.1.0-alpha.3]: https://github.com/turnerrainer/Resql/releases/tag/v0.1.0-alpha.3
 [0.1.0-alpha.2]: https://github.com/turnerrainer/Resql/releases/tag/v0.1.0-alpha.2
 [0.1.0-alpha.1]: https://github.com/turnerrainer/Resql/releases/tag/v0.1.0-alpha.1

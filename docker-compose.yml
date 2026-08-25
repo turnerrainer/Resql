@@ -1,6 +1,6 @@
 services:
   resql:
-    image: turnerrainer/resql:0.1.0-alpha.2
+    image: turnerrainer/resql:0.1.0-alpha.3
     container_name: resql
     restart: unless-stopped
     ports:

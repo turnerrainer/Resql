@@ -27,6 +27,8 @@ pub struct Config {
     pub cors: CorsConfig,
     #[serde(default)]
     pub logging: LoggingConfig,
+    #[serde(default)]
+    pub openapi: OpenApiConfig,
     /// Diagnostics collected by the compat shim. Populated in
     /// `from_yaml_str`; consumed at boot by `main.rs`. Never serialized.
     #[serde(skip)]
@@ -107,6 +109,41 @@ impl Default for LoggingConfig {
             format: default_log_format(),
         }
     }
+}
+
+/// Optional customisation for the generated OpenAPI 3.1 spec exposed
+/// at `/openapi.json`. Every field is optional; the generator falls
+/// back to sensible defaults so operators can ship without touching
+/// this block at all.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OpenApiConfig {
+    #[serde(default = "default_openapi_title")]
+    pub title: String,
+    #[serde(default = "default_openapi_description")]
+    pub description: String,
+    #[serde(default = "default_openapi_server_url")]
+    pub server_url: String,
+}
+
+impl Default for OpenApiConfig {
+    fn default() -> Self {
+        Self {
+            title: default_openapi_title(),
+            description: default_openapi_description(),
+            server_url: default_openapi_server_url(),
+        }
+    }
+}
+
+fn default_openapi_title() -> String {
+    "Resql".into()
+}
+fn default_openapi_description() -> String {
+    "SQL-files-as-REST endpoints. Spec generated from per-file declarations.".into()
+}
+fn default_openapi_server_url() -> String {
+    "/".into()
 }
 
 fn default_bind() -> String {

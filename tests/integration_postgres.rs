@@ -76,15 +76,27 @@ async fn app_with_pg(url: &str) -> common::TestApp {
         )
         .with_sql(
             "pg/POST/typechecks/pg-cast.sql",
-            "SELECT cast(:n AS INTEGER) AS coerced, :n::TEXT AS as_text",
+            "/*\nparams:\n  n: { type: integer, required: true }\n*/\nSELECT cast(:n AS INTEGER) AS coerced, :n::TEXT AS as_text",
         )
         .with_sql(
             "pg/POST/typechecks/null.sql",
-            "SELECT :maybe IS NULL AS is_null, coalesce(:maybe, 'fallback') AS resolved",
+            "/*\nparams:\n  maybe: { type: string, required: false }\n*/\nSELECT :maybe IS NULL AS is_null, coalesce(:maybe, 'fallback') AS resolved",
+        )
+        .with_sql(
+            "pg/POST/typechecks/required.sql",
+            "/*\nparams:\n  login: { type: string, required: true }\n*/\nSELECT :login AS login",
         )
         .with_sql(
             "pg/POST/typechecks/bad-grammar.sql",
             "SELECT * FROM definitely_not_a_table",
+        )
+        .with_sql(
+            "pg/GET/time/naked-timestamp.sql",
+            "SELECT TIMESTAMP '2026-01-01 10:20:30' AS ts",
+        )
+        .with_sql(
+            "pg/GET/time/naked-timestamptz.sql",
+            "SELECT TIMESTAMP WITH TIME ZONE '2026-01-01 10:20:30+00' AS ts",
         )
         .build()
         .await
@@ -123,7 +135,7 @@ async fn pg_list_active_users_multi_row() {
 }
 
 #[tokio::test]
-async fn pg_timestamptz_serialises_to_string() {
+async fn pg_timestamptz_serialises_as_iso_z() {
     let url = require_pg!();
     let app = app_with_pg(&url).await;
     let (status, body) = app
@@ -131,10 +143,38 @@ async fn pg_timestamptz_serialises_to_string() {
         .await;
     assert_eq!(status, 200);
     let created = body[0]["createdAt"].as_str().unwrap();
-    // RFC3339 with timezone. Not asserting the exact instant — Liquibase
-    // uses NOW() at seed time — only the shape.
-    assert!(created.len() >= 19, "timestamp too short: {created}");
-    assert!(created.contains('T') || created.contains(' '));
+    // Liquibase seeds with NOW() so we don't know the instant — but the
+    // shape must be ISO 8601 with `T` separator and trailing `Z` (issue #3,
+    // matches Jackson / JVM Resql default).
+    assert!(created.contains('T'), "expected T separator, got {created}");
+    assert!(created.ends_with('Z'), "expected trailing Z, got {created}");
+    assert!(!created.contains(' '), "no space separator: {created}");
+    assert!(!created.contains('+'), "no `+HH:MM` offset: {created}");
+}
+
+#[tokio::test]
+async fn pg_timestamp_literal_uses_iso_t_separator() {
+    let url = require_pg!();
+    let app = app_with_pg(&url).await;
+    let (status, body) = app
+        .request("GET", "/pg/time/naked-timestamp", None, &[])
+        .await;
+    assert_eq!(status, 200);
+    // Naive TIMESTAMP: no timezone suffix, but must use `T`, not space
+    // (chrono's default Display uses space — issue #3).
+    assert_eq!(body[0]["ts"], "2026-01-01T10:20:30");
+}
+
+#[tokio::test]
+async fn pg_timestamptz_literal_uses_iso_z_suffix() {
+    let url = require_pg!();
+    let app = app_with_pg(&url).await;
+    let (status, body) = app
+        .request("GET", "/pg/time/naked-timestamptz", None, &[])
+        .await;
+    assert_eq!(status, 200);
+    // TIMESTAMPTZ at UTC: exact `...Z` form, not `+00:00` (issue #3).
+    assert_eq!(body[0]["ts"], "2026-01-01T10:20:30Z");
 }
 
 #[tokio::test]
@@ -328,11 +368,11 @@ async fn pg_missing_param_400() {
     let url = require_pg!();
     let app = app_with_pg(&url).await;
     let (status, body) = app
-        .request("POST", "/pg/typechecks/null", Some("{}"), &[])
+        .request("POST", "/pg/typechecks/required", Some("{}"), &[])
         .await;
     assert_eq!(status, 400);
     assert_eq!(body["error"], "InvalidDataAccessApiUsageException");
-    assert!(body["message"].as_str().unwrap().contains("'maybe'"));
+    assert!(body["message"].as_str().unwrap().contains("'login'"));
 }
 
 #[tokio::test]
@@ -444,23 +484,33 @@ async fn app_with_arrays(url: &str) -> common::TestApp {
     TestAppBuilder::new()
         .no_sqlite_datasources()
         .with_postgres_datasource("pg", url)
-        .with_sql("pg/POST/arrays/unnest-int.sql", "SELECT unnest(:xs) AS n")
-        .with_sql("pg/POST/arrays/unnest-text.sql", "SELECT unnest(:xs) AS s")
-        .with_sql("pg/POST/arrays/unnest-bool.sql", "SELECT unnest(:xs) AS b")
-        .with_sql("pg/POST/arrays/unnest-float.sql", "SELECT unnest(:xs) AS f")
+        .with_sql(
+            "pg/POST/arrays/unnest-int.sql",
+            "/*\nparams:\n  xs: { type: array, required: true, items: { type: integer } }\n*/\nSELECT unnest(:xs) AS n",
+        )
+        .with_sql(
+            "pg/POST/arrays/unnest-text.sql",
+            "/*\nparams:\n  xs: { type: array, required: true, items: { type: string } }\n*/\nSELECT unnest(:xs) AS s",
+        )
+        .with_sql(
+            "pg/POST/arrays/unnest-bool.sql",
+            "/*\nparams:\n  xs: { type: array, required: true, items: { type: boolean } }\n*/\nSELECT unnest(:xs) AS b",
+        )
+        .with_sql(
+            "pg/POST/arrays/unnest-float.sql",
+            "/*\nparams:\n  xs: { type: array, required: true, items: { type: number } }\n*/\nSELECT unnest(:xs) AS f",
+        )
         .with_sql(
             "pg/POST/arrays/mixed-jsonb.sql",
             // Heterogeneous → falls back to JSONB; caller must use
             // jsonb_array_elements() and pull a specific type per element.
-            "SELECT jsonb_array_length(:xs::jsonb) AS len",
+            "/*\nparams:\n  xs: { type: array, required: true }\n*/\nSELECT jsonb_array_length(:xs::jsonb) AS len",
         )
         .with_sql(
             "pg/POST/arrays/bulk-insert.sql",
             // Single-round-trip bulk insert: two parallel arrays fanned
             // out with unnest into a real INSERT ... SELECT.
-            "INSERT INTO audit_log (actor, action) \
-             SELECT unnest(:actors), unnest(:actions) \
-             RETURNING id, actor, action",
+            "/*\nparams:\n  actors:  { type: array, required: true, items: { type: string } }\n  actions: { type: array, required: true, items: { type: string } }\n*/\nINSERT INTO audit_log (actor, action) SELECT unnest(:actors), unnest(:actions) RETURNING id, actor, action",
         )
         .build()
         .await

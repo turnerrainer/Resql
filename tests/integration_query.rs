@@ -52,14 +52,43 @@ async fn post_query_with_json_body() {
 
 #[tokio::test]
 async fn missing_param_returns_400_named_shape() {
+    // Declaration marks `login` required, so an empty body produces the
+    // Java-canonical missing-parameter error.
     let app = TestAppBuilder::new()
-        .with_sql("demo/POST/x.sql", "SELECT :login AS l")
+        .with_sql(
+            "demo/POST/x.sql",
+            "/*\nparams:\n  login: { type: string, required: true }\n*/\nSELECT :login AS l",
+        )
         .build()
         .await;
     let (status, body) = app.request("POST", "/demo/x", Some("{}"), &[]).await;
     assert_eq!(status, 400);
     assert_eq!(body["error"], "InvalidDataAccessApiUsageException");
     assert!(body["message"].as_str().unwrap().contains("'login'"));
+}
+
+#[tokio::test]
+async fn missing_optional_param_binds_null() {
+    // Regression for Resql#4 (task 008): a declared-optional param can
+    // be omitted; the SQL sees NULL and `IS NULL OR …` guards work.
+    let app = TestAppBuilder::new()
+        .with_seed(
+            "CREATE TABLE u (login TEXT, status TEXT); \
+             INSERT INTO u VALUES ('alice', 'active'); \
+             INSERT INTO u VALUES ('bob',   'disabled');",
+        )
+        .with_sql(
+            "demo/POST/find.sql",
+            "/*\nparams:\n  login:  { type: string, required: true }\n  status: { type: string, required: false }\n*/\nSELECT login FROM u WHERE (:login IS NULL OR login = :login) AND (:status IS NULL OR status = :status)",
+        )
+        .build()
+        .await;
+    // No `status` key at all — should succeed and return alice.
+    let (status, body) = app
+        .request("POST", "/demo/find", Some(r#"{"login":"alice"}"#), &[])
+        .await;
+    assert_eq!(status, 200);
+    assert_eq!(body, json!([{"login": "alice"}]));
 }
 
 #[tokio::test]
@@ -148,7 +177,9 @@ async fn malformed_json_returns_400() {
 }
 
 #[tokio::test]
-async fn extra_body_params_ignored() {
+async fn extra_body_params_rejected() {
+    // Task 008 tightens the runtime: unknown keys are no longer
+    // silently dropped, they surface as `UnknownParameterException`.
     let app = TestAppBuilder::new()
         .with_sql("demo/POST/x.sql", "SELECT :used AS u")
         .build()
@@ -157,12 +188,92 @@ async fn extra_body_params_ignored() {
         .request(
             "POST",
             "/demo/x",
-            Some(r#"{"used": 42, "extra": "hi"}"#),
+            Some(r#"{"used": "42", "extra": "hi"}"#),
+            &[],
+        )
+        .await;
+    assert_eq!(status, 400);
+    assert_eq!(body["error"], "UnknownParameterException");
+    assert!(body["message"].as_str().unwrap().contains("'extra'"));
+}
+
+#[tokio::test]
+async fn wrong_type_returns_400() {
+    let app = TestAppBuilder::new()
+        .with_sql(
+            "demo/POST/x.sql",
+            "/*\nparams:\n  n: { type: integer, required: true }\n*/\nSELECT :n AS n",
+        )
+        .build()
+        .await;
+    let (status, body) = app
+        .request("POST", "/demo/x", Some(r#"{"n": true}"#), &[])
+        .await;
+    assert_eq!(status, 400);
+    assert_eq!(body["error"], "InvalidParameterTypeException");
+}
+
+#[tokio::test]
+async fn value_outside_declared_enum_returns_400() {
+    // Security boundary: a value not in the declared `enum:` set is
+    // rejected at the request boundary — never reaches SQL binding.
+    let app = TestAppBuilder::new()
+        .with_sql(
+            "demo/POST/set-status.sql",
+            "/*\nparams:\n  status: { type: string, required: true, enum: [active, disabled] }\n*/\nSELECT :status AS status",
+        )
+        .build()
+        .await;
+    let (status, body) = app
+        .request(
+            "POST",
+            "/demo/set-status",
+            Some(r#"{"status": "pending"}"#),
+            &[],
+        )
+        .await;
+    assert_eq!(status, 400);
+    assert_eq!(body["error"], "InvalidParameterValueException");
+    let msg = body["message"].as_str().unwrap();
+    assert!(msg.contains("status"), "message = {msg}");
+    assert!(msg.contains("pending"), "message = {msg}");
+}
+
+#[tokio::test]
+async fn get_query_value_outside_declared_enum_returns_400() {
+    let app = TestAppBuilder::new()
+        .with_sql(
+            "demo/GET/by-status.sql",
+            "/*\nparams:\n  status: { type: string, required: true, enum: [active, disabled] }\n*/\nSELECT :status AS status",
+        )
+        .build()
+        .await;
+    let (status, body) = app
+        .request("GET", "/demo/by-status?status=bogus", None, &[])
+        .await;
+    assert_eq!(status, 400);
+    assert_eq!(body["error"], "InvalidParameterValueException");
+}
+
+#[tokio::test]
+async fn value_in_declared_enum_is_accepted() {
+    let app = TestAppBuilder::new()
+        .with_sql(
+            "demo/POST/set-status.sql",
+            "/*\nparams:\n  status: { type: string, required: true, enum: [active, disabled] }\n*/\nSELECT :status AS status",
+        )
+        .build()
+        .await;
+    let (status, body) = app
+        .request(
+            "POST",
+            "/demo/set-status",
+            Some(r#"{"status": "active"}"#),
             &[],
         )
         .await;
     assert_eq!(status, 200);
-    assert_eq!(body, json!([{"u": 42}]));
+    assert_eq!(body[0]["status"], "active");
 }
 
 #[tokio::test]
@@ -202,7 +313,10 @@ async fn batch_returns_array_of_arrays() {
 #[tokio::test]
 async fn batch_with_missing_param_returns_400() {
     let app = TestAppBuilder::new()
-        .with_sql("demo/POST/lookup.sql", "SELECT :login AS l")
+        .with_sql(
+            "demo/POST/lookup.sql",
+            "/*\nparams:\n  login: { type: string, required: true }\n*/\nSELECT :login AS l",
+        )
         .build()
         .await;
     let (status, body) = app
@@ -317,7 +431,10 @@ async fn batch_body_must_have_queries_field() {
 #[tokio::test]
 async fn repeated_named_params_bind_correctly() {
     let app = TestAppBuilder::new()
-        .with_sql("demo/POST/repeat.sql", "SELECT :x AS a, :x AS b, :y AS c")
+        .with_sql(
+            "demo/POST/repeat.sql",
+            "/*\nparams:\n  x: { type: integer, required: true }\n  y: { type: integer, required: true }\n*/\nSELECT :x AS a, :x AS b, :y AS c",
+        )
         .build()
         .await;
     let (status, body) = app

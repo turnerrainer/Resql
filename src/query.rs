@@ -4,6 +4,7 @@ use sqlx::sqlite::SqliteRow;
 use sqlx::{Column, Row, TypeInfo};
 
 use crate::db::Pool;
+use crate::declaration::{Declaration, ParamType};
 use crate::error::ResqlError;
 
 /// Convert a Java-style named-parameter SQL (`:name`) into positional
@@ -128,12 +129,13 @@ impl From<&Pool> for Dialect {
 pub async fn execute(
     pool: &Pool,
     sql: &str,
+    declaration: &Declaration,
     params: &Value,
 ) -> Result<Vec<Map<String, Value>>, ResqlError> {
     let dialect = Dialect::from(pool);
     let (rewritten, param_names) = rewrite_named_params(sql, dialect);
-    let param_map = normalise_params(params)?;
-    check_missing(&param_names, &param_map)?;
+    let raw_map = normalise_params(params)?;
+    let param_map = validate_params(declaration, raw_map)?;
 
     match pool {
         Pool::Postgres(pg) => run_pg(pg, &rewritten, &param_names, &param_map).await,
@@ -147,12 +149,13 @@ pub async fn execute(
 pub async fn execute_transactional(
     pool: &Pool,
     sql: &str,
+    declaration: &Declaration,
     params: &Value,
 ) -> Result<Vec<Map<String, Value>>, ResqlError> {
     let dialect = Dialect::from(pool);
     let (rewritten, param_names) = rewrite_named_params(sql, dialect);
-    let param_map = normalise_params(params)?;
-    check_missing(&param_names, &param_map)?;
+    let raw_map = normalise_params(params)?;
+    let param_map = validate_params(declaration, raw_map)?;
 
     match pool {
         Pool::Postgres(pg) => {
@@ -174,18 +177,18 @@ pub async fn execute_transactional(
 pub async fn execute_batch(
     pool: &Pool,
     sql: &str,
+    declaration: &Declaration,
     param_sets: Vec<Value>,
 ) -> Result<Vec<Vec<Map<String, Value>>>, ResqlError> {
     let dialect = Dialect::from(pool);
     let (rewritten, param_names) = rewrite_named_params(sql, dialect);
 
-    // Normalise + missing-param check every set BEFORE opening the tx so
-    // the "batch of bad requests" case fails fast without hitting the DB.
+    // Normalise + declaration-validate every set BEFORE opening the tx
+    // so the "batch of bad requests" case fails fast without hitting the DB.
     let mut normalised: Vec<Map<String, Value>> = Vec::with_capacity(param_sets.len());
     for p in &param_sets {
-        let m = normalise_params(p)?;
-        check_missing(&param_names, &m)?;
-        normalised.push(m);
+        let raw_map = normalise_params(p)?;
+        normalised.push(validate_params(declaration, raw_map)?);
     }
 
     match pool {
@@ -232,13 +235,154 @@ fn normalise_params(v: &Value) -> Result<Map<String, Value>, ResqlError> {
     }
 }
 
-fn check_missing(names: &[String], params: &Map<String, Value>) -> Result<(), ResqlError> {
-    for name in names {
-        if !params.contains_key(name) {
-            return Err(ResqlError::MissingParameter(name.clone()));
+/// Validate an incoming parameter map against the declaration. Rejects
+/// unknown keys, wrong types, and missing required. Fills missing
+/// optionals with the declared `default` (or JSON null when no default
+/// is set) so the bind layer always sees an entry for every declared
+/// param — that's what makes `IS NULL OR col = :x` filters work when
+/// the caller omits the key (task 008 / issue #4).
+///
+/// The returned map contains exactly one entry per declared param, in
+/// declaration-agnostic order. Any `:name` a SQL-writer forgot to
+/// declare would have failed the file at boot, so the runtime never
+/// sees an undeclared `:name` here.
+pub fn validate_params(
+    declaration: &Declaration,
+    mut incoming: Map<String, Value>,
+) -> Result<Map<String, Value>, ResqlError> {
+    // 1. Reject unknown keys.
+    for key in incoming.keys() {
+        if !declaration.params.contains_key(key) {
+            return Err(ResqlError::UnknownParameter(key.clone()));
         }
     }
-    Ok(())
+    // 2. For every declared param: coerce/validate present values,
+    //    fill absent optionals with default (or null), reject missing
+    //    required.
+    let mut out = Map::with_capacity(declaration.params.len());
+    for (name, spec) in &declaration.params {
+        if let Some(v) = incoming.remove(name) {
+            let coerced =
+                coerce_to(spec.ty, v).map_err(|actual| ResqlError::InvalidParameterType {
+                    name: name.clone(),
+                    expected: spec.ty.as_str(),
+                    actual,
+                })?;
+            // A declared-required param present as JSON null is still
+            // "missing" per the semantics we advertise (the null is
+            // representationally there, but the caller declared it
+            // required so treating null as satisfaction is a footgun).
+            if spec.required && coerced.is_null() {
+                return Err(ResqlError::MissingParameter(name.clone()));
+            }
+            // Closed-set validation: reject values outside the declared
+            // `enum:` set (JSON Schema semantics — null bypasses; the
+            // required/optional gate handles nullability).
+            if let Some(allowed) = &spec.allowed {
+                if !coerced.is_null() && !allowed.iter().any(|v| v == &coerced) {
+                    return Err(ResqlError::InvalidParameterValue {
+                        name: name.clone(),
+                        value: display_value(&coerced),
+                        allowed: allowed.iter().map(display_value).collect(),
+                    });
+                }
+            }
+            out.insert(name.clone(), coerced);
+        } else if spec.required {
+            return Err(ResqlError::MissingParameter(name.clone()));
+        } else {
+            let filled = spec.default.clone().unwrap_or(Value::Null);
+            out.insert(name.clone(), filled);
+        }
+    }
+    Ok(out)
+}
+
+/// Render a JSON value for use in error messages: strings unquoted,
+/// everything else JSON-encoded (compact, deterministic).
+fn display_value(v: &Value) -> String {
+    match v {
+        Value::String(s) => s.clone(),
+        other => other.to_string(),
+    }
+}
+
+/// Coerce a JSON value to the declared type. Returns Err with a
+/// human-readable "actual type" tag on mismatch. Numeric widening
+/// (int → number, string-encoded number → integer / number) is
+/// permitted; the coercion tries hard within the type family but never
+/// crosses families (e.g. no string → bool). Null passes every type
+/// check — `required` handling is separate.
+pub fn coerce_to(ty: ParamType, v: Value) -> Result<Value, String> {
+    match (ty, v) {
+        (_, Value::Null) => Ok(Value::Null),
+        // string family
+        (ParamType::String, Value::String(s))
+        | (ParamType::Date, Value::String(s))
+        | (ParamType::Datetime, Value::String(s))
+        | (ParamType::Uuid, Value::String(s)) => Ok(Value::String(s)),
+        // integer: accept i64 as-is; f64 with no fractional part; string
+        //          that parses cleanly.
+        (ParamType::Integer, Value::Number(n)) => {
+            if let Some(i) = n.as_i64() {
+                Ok(Value::Number(i.into()))
+            } else if let Some(f) = n.as_f64() {
+                if f.fract() == 0.0 && f >= i64::MIN as f64 && f <= i64::MAX as f64 {
+                    Ok(Value::Number((f as i64).into()))
+                } else {
+                    Err(format!("number {f} is not a whole integer"))
+                }
+            } else {
+                Err("number out of range".into())
+            }
+        }
+        (ParamType::Integer, Value::String(s)) => s
+            .parse::<i64>()
+            .map(|i| Value::Number(i.into()))
+            .map_err(|_| format!("string \"{s}\" is not a valid integer")),
+        // number: accept i64 or f64; string that parses.
+        (ParamType::Number, Value::Number(n)) => Ok(Value::Number(n)),
+        (ParamType::Number, Value::String(s)) => s
+            .parse::<f64>()
+            .ok()
+            .and_then(serde_json::Number::from_f64)
+            .map(Value::Number)
+            .ok_or_else(|| format!("string \"{s}\" is not a valid number")),
+        // boolean: accept native bool; strings "true"/"false"/"1"/"0".
+        (ParamType::Boolean, Value::Bool(b)) => Ok(Value::Bool(b)),
+        (ParamType::Boolean, Value::String(s)) => match s.as_str() {
+            "true" | "1" => Ok(Value::Bool(true)),
+            "false" | "0" => Ok(Value::Bool(false)),
+            other => Err(format!("string \"{other}\" is not a valid boolean")),
+        },
+        // array: accept JSON array; also accept a string that JSON-parses
+        //        to an array (this is how GET query-string params reach
+        //        us — `?xs=[1,2,3]`).
+        (ParamType::Array, Value::Array(a)) => Ok(Value::Array(a)),
+        (ParamType::Array, Value::String(s)) => match serde_json::from_str::<Value>(&s) {
+            Ok(Value::Array(a)) => Ok(Value::Array(a)),
+            _ => Err(format!("string \"{s}\" is not a valid JSON array")),
+        },
+        // object: accept JSON object; string that JSON-parses to object.
+        (ParamType::Object, Value::Object(o)) => Ok(Value::Object(o)),
+        (ParamType::Object, Value::String(s)) => match serde_json::from_str::<Value>(&s) {
+            Ok(Value::Object(o)) => Ok(Value::Object(o)),
+            _ => Err(format!("string \"{s}\" is not a valid JSON object")),
+        },
+        // Anything else is a family mismatch.
+        (_, other) => Err(json_type_name(&other).to_string()),
+    }
+}
+
+fn json_type_name(v: &Value) -> &'static str {
+    match v {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
 }
 
 fn sql_err(e: sqlx::Error) -> ResqlError {
@@ -548,16 +692,20 @@ fn pg_column_value(row: &PgRow, idx: usize, ty: &str) -> Value {
             return v.0;
         }
     }
-    // Timestamps and dates: stringify.
+    // Timestamps and dates: stringify as ISO 8601. `NaiveDateTime`'s Display
+    // uses a space separator (`2026-01-01 10:20:30`), which is neither ISO
+    // 8601 nor RFC 3339 and breaks JSON consumers; force the `T` separator.
+    // For TIMESTAMPTZ we emit the trailing `Z` form (Jackson / JVM Resql
+    // default) rather than chrono's `+00:00`.
     if matches!(
         ty_upper.as_str(),
         "TIMESTAMP" | "TIMESTAMPTZ" | "DATE" | "TIME" | "TIMETZ"
     ) {
         if let Ok(Some(v)) = row.try_get::<Option<chrono::NaiveDateTime>, _>(idx) {
-            return Value::String(v.to_string());
+            return Value::String(v.format("%Y-%m-%dT%H:%M:%S%.f").to_string());
         }
         if let Ok(Some(v)) = row.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>(idx) {
-            return Value::String(v.to_rfc3339());
+            return Value::String(v.format("%Y-%m-%dT%H:%M:%S%.fZ").to_string());
         }
         if let Ok(Some(v)) = row.try_get::<Option<chrono::NaiveDate>, _>(idx) {
             return Value::String(v.to_string());
@@ -731,24 +879,26 @@ mod tests {
         assert_eq!(params, vec!["a", "b"]);
     }
 
-    #[tokio::test]
-    async fn missing_param_returns_named_error() {
-        let pool = sqlx::sqlite::SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect("sqlite::memory:")
-            .await
-            .unwrap();
-        let err = execute(&Pool::Sqlite(pool), "SELECT :missing_key AS x", &json!({}))
-            .await
-            .unwrap_err();
-        match err {
-            ResqlError::MissingParameter(name) => assert_eq!(name, "missing_key"),
-            other => panic!("unexpected error: {other:?}"),
+    /// Build a permissive declaration for a set of named params, all
+    /// `string`, all optional. Used by tests that want to exercise the
+    /// execute path without repeating the fence in every fixture.
+    fn declare(params: &[&str]) -> Declaration {
+        let mut yaml = String::from("params:\n");
+        if params.is_empty() {
+            yaml.push_str("  {}\n");
+        } else {
+            for n in params {
+                yaml.push_str(&format!("  {n}: {{ type: string, required: false }}\n"));
+            }
         }
+        serde_yaml_ng::from_str(&yaml).unwrap()
     }
 
     #[tokio::test]
-    async fn extra_params_ignored() {
+    async fn missing_optional_param_binds_null() {
+        // The regression for issue #4: SQL references :missing_key, the
+        // caller doesn't send it, and because it's optional the bind
+        // layer sees NULL — not a MissingParameter error.
         let pool = sqlx::sqlite::SqlitePoolOptions::new()
             .max_connections(1)
             .connect("sqlite::memory:")
@@ -756,13 +906,98 @@ mod tests {
             .unwrap();
         let rows = execute(
             &Pool::Sqlite(pool),
-            "SELECT :used AS u",
-            &json!({"used": 1, "unused": "x"}),
+            "SELECT :missing_key IS NULL AS is_null",
+            &declare(&["missing_key"]),
+            &json!({}),
         )
         .await
         .unwrap();
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].get("u").unwrap(), &json!(1));
+        assert_eq!(rows[0].get("isNull").unwrap(), &json!(1));
+    }
+
+    #[tokio::test]
+    async fn required_param_missing_errors() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let decl: Declaration =
+            serde_yaml_ng::from_str("params:\n  needed: { type: string, required: true }\n")
+                .unwrap();
+        let err = execute(
+            &Pool::Sqlite(pool),
+            "SELECT :needed AS x",
+            &decl,
+            &json!({}),
+        )
+        .await
+        .unwrap_err();
+        match err {
+            ResqlError::MissingParameter(name) => assert_eq!(name, "needed"),
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn unknown_param_rejected() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let err = execute(
+            &Pool::Sqlite(pool),
+            "SELECT :used AS u",
+            &declare(&["used"]),
+            &json!({"used": "ok", "unused": "x"}),
+        )
+        .await
+        .unwrap_err();
+        match err {
+            ResqlError::UnknownParameter(name) => assert_eq!(name, "unused"),
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn wrong_type_rejected() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let decl: Declaration =
+            serde_yaml_ng::from_str("params:\n  n: { type: integer }\n").unwrap();
+        let err = execute(
+            &Pool::Sqlite(pool),
+            "SELECT :n AS n",
+            &decl,
+            &json!({"n": true}),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(err, ResqlError::InvalidParameterType { .. }),
+            "err = {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn default_used_when_optional_absent() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let decl: Declaration = serde_yaml_ng::from_str(
+            "params:\n  s: { type: string, required: false, default: fallback }\n",
+        )
+        .unwrap();
+        let rows = execute(&Pool::Sqlite(pool), "SELECT :s AS s", &decl, &json!({}))
+            .await
+            .unwrap();
+        assert_eq!(rows[0].get("s").unwrap(), &json!("fallback"));
     }
 
     #[tokio::test]
@@ -775,6 +1010,7 @@ mod tests {
         let rows = execute(
             &Pool::Sqlite(pool),
             "CREATE TABLE x (id INTEGER)",
+            &declare(&[]),
             &json!({}),
         )
         .await
@@ -792,6 +1028,7 @@ mod tests {
         let rows = execute(
             &Pool::Sqlite(pool.clone()),
             "SELECT 1 AS user_id, 'x' AS password_hash",
+            &declare(&[]),
             &json!({}),
         )
         .await
@@ -810,6 +1047,7 @@ mod tests {
         let rows = execute(
             &Pool::Sqlite(pool),
             "SELECT :v IS NULL AS is_null",
+            &declare(&["v"]),
             &json!({"v": Value::Null}),
         )
         .await
@@ -878,9 +1116,163 @@ mod tests {
             .connect("sqlite::memory:")
             .await
             .unwrap();
-        let err = execute(&Pool::Sqlite(pool), "SELECT 1", &json!("not an object"))
-            .await
-            .unwrap_err();
+        let err = execute(
+            &Pool::Sqlite(pool),
+            "SELECT 1",
+            &declare(&[]),
+            &json!("not an object"),
+        )
+        .await
+        .unwrap_err();
         assert!(matches!(err, ResqlError::MalformedRequest(_)));
+    }
+
+    #[test]
+    fn coerce_integer_from_number_string_and_wholef64() {
+        assert_eq!(coerce_to(ParamType::Integer, json!(42)).unwrap(), json!(42));
+        assert_eq!(
+            coerce_to(ParamType::Integer, json!("42")).unwrap(),
+            json!(42)
+        );
+        assert_eq!(
+            coerce_to(ParamType::Integer, json!(42.0)).unwrap(),
+            json!(42)
+        );
+        assert!(coerce_to(ParamType::Integer, json!(42.5)).is_err());
+        assert!(coerce_to(ParamType::Integer, json!("nope")).is_err());
+    }
+
+    #[test]
+    fn coerce_boolean_from_string_forms() {
+        assert_eq!(
+            coerce_to(ParamType::Boolean, json!("true")).unwrap(),
+            json!(true)
+        );
+        assert_eq!(
+            coerce_to(ParamType::Boolean, json!("0")).unwrap(),
+            json!(false)
+        );
+        assert!(coerce_to(ParamType::Boolean, json!("yes")).is_err());
+    }
+
+    #[test]
+    fn coerce_number_from_integer_and_string() {
+        assert!(matches!(
+            coerce_to(ParamType::Number, json!(1)).unwrap(),
+            Value::Number(_)
+        ));
+        assert!(matches!(
+            coerce_to(ParamType::Number, json!("3.14")).unwrap(),
+            Value::Number(_)
+        ));
+        assert!(coerce_to(ParamType::Number, json!("nope")).is_err());
+    }
+
+    #[test]
+    fn coerce_array_from_json_string() {
+        assert_eq!(
+            coerce_to(ParamType::Array, json!("[1,2,3]")).unwrap(),
+            json!([1, 2, 3])
+        );
+        assert!(coerce_to(ParamType::Array, json!("not-json")).is_err());
+    }
+
+    #[test]
+    fn validate_rejects_required_null() {
+        let decl: Declaration =
+            serde_yaml_ng::from_str("params:\n  n: { type: string, required: true }\n").unwrap();
+        let mut incoming = Map::new();
+        incoming.insert("n".to_string(), Value::Null);
+        let err = validate_params(&decl, incoming).unwrap_err();
+        assert!(matches!(err, ResqlError::MissingParameter(_)));
+    }
+
+    #[test]
+    fn validate_fills_missing_optional_with_default() {
+        let decl: Declaration = serde_yaml_ng::from_str(
+            "params:\n  n: { type: integer, required: false, default: 7 }\n",
+        )
+        .unwrap();
+        let out = validate_params(&decl, Map::new()).unwrap();
+        assert_eq!(out.get("n").unwrap(), &json!(7));
+    }
+
+    #[test]
+    fn validate_accepts_value_in_enum() {
+        let (decl, _) = crate::declaration::parse(
+            "/*\nparams:\n  status: { type: string, required: true, enum: [active, disabled] }\n*/\nSELECT :status;\n",
+        )
+        .unwrap();
+        let mut incoming = Map::new();
+        incoming.insert("status".to_string(), json!("active"));
+        let out = validate_params(&decl, incoming).unwrap();
+        assert_eq!(out["status"], json!("active"));
+    }
+
+    #[test]
+    fn validate_rejects_value_outside_enum() {
+        let (decl, _) = crate::declaration::parse(
+            "/*\nparams:\n  status: { type: string, required: true, enum: [active, disabled] }\n*/\nSELECT :status;\n",
+        )
+        .unwrap();
+        let mut incoming = Map::new();
+        incoming.insert("status".to_string(), json!("pending"));
+        let err = validate_params(&decl, incoming).unwrap_err();
+        match err {
+            ResqlError::InvalidParameterValue {
+                name,
+                value,
+                allowed,
+            } => {
+                assert_eq!(name, "status");
+                assert_eq!(value, "pending");
+                assert_eq!(allowed, vec!["active".to_string(), "disabled".to_string()]);
+            }
+            other => panic!("expected InvalidParameterValue, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_null_bypasses_enum_check() {
+        // Optional param, explicit null in request. Null bypasses enum
+        // (JSON Schema semantics — required/optional gate handles
+        // nullability separately).
+        let (decl, _) = crate::declaration::parse(
+            "/*\nparams:\n  status: { type: string, enum: [active, disabled] }\n*/\nSELECT :status;\n",
+        )
+        .unwrap();
+        let mut incoming = Map::new();
+        incoming.insert("status".to_string(), Value::Null);
+        let out = validate_params(&decl, incoming).unwrap();
+        assert!(out["status"].is_null());
+    }
+
+    #[test]
+    fn validate_missing_optional_with_enum_binds_null() {
+        // Same as above but omitted from the request rather than
+        // explicitly null.
+        let (decl, _) = crate::declaration::parse(
+            "/*\nparams:\n  status: { type: string, enum: [active, disabled] }\n*/\nSELECT :status;\n",
+        )
+        .unwrap();
+        let out = validate_params(&decl, Map::new()).unwrap();
+        assert!(out["status"].is_null());
+    }
+
+    #[test]
+    fn validate_get_string_value_is_enum_checked_after_coercion() {
+        // GET query strings arrive as strings; the coercion pass keeps
+        // strings as-is, and the enum check runs against the coerced
+        // value. This test locks in that ordering.
+        let (decl, _) = crate::declaration::parse(
+            "/*\nparams:\n  status: { type: string, required: true, enum: [active, disabled] }\n*/\nSELECT :status;\n",
+        )
+        .unwrap();
+        let mut incoming = Map::new();
+        incoming.insert("status".to_string(), json!("bogus"));
+        assert!(matches!(
+            validate_params(&decl, incoming).unwrap_err(),
+            ResqlError::InvalidParameterValue { .. }
+        ));
     }
 }

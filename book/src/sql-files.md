@@ -4,6 +4,11 @@ Every `.sql` file under `sql_dir` becomes one HTTP endpoint. This chapter
 covers the directory layout, parameter binding, result shaping, and the
 batch API.
 
+> **Every `.sql` file must open with a `/* … */` YAML declaration block.** See
+> [Declarations & OpenAPI](./declarations.md) for the syntax and the
+> validation semantics that the fence unlocks (optional params, typed
+> requests, generated OpenAPI spec).
+
 ## Directory layout → URL
 
 The scanner expects three levels:
@@ -48,6 +53,15 @@ to it. Repeated `:name` binds the same value at every position.
 
 ```sql
 -- sql/crm/POST/users/find.sql
+/*
+params:
+  login:
+    type: string
+    required: false
+  status:
+    type: string
+    required: false
+*/
 SELECT id, email
 FROM users
 WHERE (:login IS NULL OR login = :login)
@@ -76,10 +90,18 @@ curl "http://localhost:8080/crm/users/find?login=alice"
 
 ## Missing / extra parameters
 
-- **Missing**: any `:name` in the SQL that has no matching JSON key →
-  HTTP 400 with `error: InvalidDataAccessApiUsageException` and the
-  parameter name in the message.
-- **Extra**: extra JSON keys are silently ignored.
+Behaviour depends on the file's declaration
+(see [Declarations & OpenAPI](./declarations.md)):
+
+- **Required missing**: 400 with `error:
+  InvalidDataAccessApiUsageException`.
+- **Optional missing**: SQL NULL is bound. If the declaration sets
+  `default:`, that value is bound instead.
+- **Unknown key** (not in `params`): 400 with `error:
+  UnknownParameterException`.
+- **Wrong type**: 400 with `error: InvalidParameterTypeException`.
+- **Value outside declared `enum:`**: 400 with `error:
+  InvalidParameterValueException`.
 
 ## Type coercion
 
@@ -93,9 +115,16 @@ JSON values bind at their natural type:
 - arrays / objects (Postgres only) → JSONB (bind with `::jsonb` cast if
   you want the DB to enforce it)
 
-For dates and timestamps, cast in SQL:
+For dates and timestamps, cast in SQL and declare the param as `datetime`:
 
 ```sql
+/*
+params:
+  occurredAt:
+    type: datetime
+    required: true
+    format: date-time
+*/
 INSERT INTO events (occurred_at)
 VALUES (cast(:occurredAt AS TIMESTAMPTZ));
 ```
@@ -170,6 +199,23 @@ in one round-trip:
 
 ```sql
 -- sql/audit/POST/append-many.sql
+/*
+params:
+  actors:
+    type: array
+    required: true
+    items:
+      type: string
+  actions:
+    type: array
+    required: true
+    items:
+      type: string
+returns:
+  - name: id
+    type: integer
+    nullable: false
+*/
 INSERT INTO audit_log (actor, action)
 SELECT unnest(:actors), unnest(:actions)
 RETURNING id;
@@ -199,17 +245,30 @@ Rules:
 
 ## Per-file `@transactional` marker
 
-Add `-- @transactional` as the very first comment in a SQL file to
-have the endpoint's execution wrapped in a single database transaction
-(commit on success, rollback on any error). Batch endpoints are always
+Add `-- @transactional` as a leading comment after the declaration
+block, before the first SQL statement, to have the endpoint's
+execution wrapped in a single database transaction (commit on
+success, rollback on any error). Batch endpoints are always
 transactional regardless — this marker is for single-shot POST
 endpoints whose SQL contains multiple statements or where the caller
 wants explicit rollback semantics on failure.
 
 ```sql
+/*
+params:
+  actor:
+    type: string
+    required: true
+  action:
+    type: string
+    required: true
+  userId:
+    type: integer
+    required: true
+*/
 -- @transactional
 INSERT INTO audit_log (actor, action) VALUES (:actor, :action);
-UPDATE users SET last_seen = now() WHERE id = :user_id;
+UPDATE users SET last_seen = now() WHERE id = :userId;
 ```
 
 Rules:
