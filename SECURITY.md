@@ -28,7 +28,7 @@ compromise), say so in the subject line and I will prioritise.
 
 ## Supported versions
 
-Only the latest release on the `main` branch (currently `0.1.0-alpha.3`)
+Only the latest release on the `main` branch (currently `0.1.0-alpha.4`)
 is supported for security fixes. Pre-release channels (`rc`, `beta`,
 `alpha`, `preview`) receive fixes on the same schedule as `main`.
 

@@ -198,6 +198,20 @@ impl TestApp {
         body: Option<&str>,
         headers: &[(&str, &str)],
     ) -> (u16, Value) {
+        let (status, _resp_headers, body) = self.request_full(method, path, body, headers).await;
+        (status, body)
+    }
+
+    /// Same as `request` but also returns the response headers as a
+    /// `HeaderMap`. Use when a test needs to assert on headers the
+    /// middleware set (trace id, CORS, etc.).
+    pub async fn request_full(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<&str>,
+        headers: &[(&str, &str)],
+    ) -> (u16, axum::http::HeaderMap, Value) {
         use axum::body::Body;
         use axum::http::{Request, StatusCode};
         use http_body_util::BodyExt;
@@ -216,6 +230,7 @@ impl TestApp {
         };
         let resp = self.router.clone().oneshot(req).await.unwrap();
         let status: StatusCode = resp.status();
+        let resp_headers = resp.headers().clone();
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let json: Value = if bytes.is_empty() {
             Value::Null
@@ -223,7 +238,7 @@ impl TestApp {
             serde_json::from_slice(&bytes)
                 .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&bytes).into_owned()))
         };
-        (status.as_u16(), json)
+        (status.as_u16(), resp_headers, json)
     }
 
     pub fn sql_root(&self) -> &Path {

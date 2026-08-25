@@ -106,18 +106,29 @@ async fn main() -> Result<()> {
 }
 
 fn init_tracing(level: &str, format: &str) {
-    // RESQL_LOG env overrides YAML level directive if set.
+    // RESQL_LOG env overrides YAML level; RESQL_LOG_FORMAT overrides
+    // YAML format so an operator can flip a running container's log
+    // shape (text ↔ json) without editing the config file.
     let env_directive = std::env::var("RESQL_LOG").unwrap_or_else(|_| level.to_string());
     let filter = tracing_subscriber::EnvFilter::try_new(env_directive)
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    let effective_format = std::env::var("RESQL_LOG_FORMAT")
+        .ok()
+        .map(|s| s.to_ascii_lowercase())
+        .unwrap_or_else(|| format.to_ascii_lowercase());
 
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
 
     let base = tracing_subscriber::registry().with(filter);
-    match format {
+    match effective_format.as_str() {
         "json" => base
-            .with(tracing_subscriber::fmt::layer().json())
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .json()
+                    .with_current_span(true)
+                    .with_span_list(false),
+            )
             .try_init()
             .ok(),
         _ => base.with(tracing_subscriber::fmt::layer()).try_init().ok(),

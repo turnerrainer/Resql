@@ -7,9 +7,9 @@ at `<METHOD> /<project>/<name>` on next startup. JSON payload keys bind
 to `:named` SQL parameters. Result columns are re-cased snake → camel and
 returned as a JSON array.
 
-**Version:** 0.1.0-alpha.3
+**Version:** 0.1.0-alpha.4
 **License:** [Apache-2.0](https://www.apache.org/licenses/LICENSE-2.0)
-**Container:** `docker.io/turnerrainer/resql:0.1.0-alpha.3`
+**Container:** `docker.io/turnerrainer/resql:0.1.0-alpha.4`
 **Source:** [github.com/turnerrainer/Resql](https://github.com/turnerrainer/Resql)
 
 ## One-command demo
@@ -18,7 +18,7 @@ The published image ships with a working SQLite-backed multi-database
 demo: two datasources (`users` and `audit`) wired to two URL projects.
 
 ```bash
-docker run --rm -p 8080:8080 turnerrainer/resql:0.1.0-alpha.3
+docker run --rm -p 8080:8080 turnerrainer/resql:0.1.0-alpha.4
 
 # Hits the `users` datasource:
 curl "http://localhost:8080/users/hello?name=world"

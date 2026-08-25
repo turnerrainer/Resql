@@ -4,9 +4,9 @@ SQL-files-as-REST-endpoints microservice. Drop a `.sql` file, get an HTTP
 endpoint. Rust rewrite of the [Bürokratt Resql](https://github.com/buerokratt/Resql)
 Spring Boot service.
 
-**Version:** 0.1.0-alpha.3
+**Version:** 0.1.0-alpha.4
 **License:** [Apache-2.0](./LICENSE)
-**Container:** `docker.io/turnerrainer/resql:0.1.0-alpha.3`
+**Container:** `docker.io/turnerrainer/resql:0.1.0-alpha.4`
 
 ## One-command demo
 
@@ -14,7 +14,7 @@ The shipped image wires **two** SQLite datasources (`users` and `audit`)
 so multi-database routing works out of the box.
 
 ```bash
-docker run --rm -p 8080:8080 turnerrainer/resql:0.1.0-alpha.3
+docker run --rm -p 8080:8080 turnerrainer/resql:0.1.0-alpha.4
 curl "http://localhost:8080/users/hello?name=world"
 # [{"greeting":"hello from users db, world!"}]
 curl "http://localhost:8080/audit/tail?n=42"

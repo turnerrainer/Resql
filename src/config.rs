@@ -100,6 +100,31 @@ pub struct LoggingConfig {
     pub level: String,
     #[serde(default = "default_log_format")]
     pub format: String,
+
+    /// Emit one INFO line per completed HTTP request with method,
+    /// route, status, duration, project, client, trace_id. On by
+    /// default — the operational access log every service should have.
+    #[serde(default = "default_true")]
+    pub access_log: bool,
+
+    /// When a request returns an error response, include the error's
+    /// `source()` chain on the WARN log line. Off by default — top-
+    /// level `Display` is usually enough and chains can leak schema
+    /// details from the underlying driver.
+    #[serde(default)]
+    pub print_stack_trace: bool,
+
+    /// Cap on any body content included in a log line. Defaults to
+    /// 2 KiB — enough to identify the shape without shipping full
+    /// payloads to the log store.
+    #[serde(default = "default_max_body_bytes")]
+    pub max_body_bytes: usize,
+
+    /// JSON body field names replaced with `"[REDACTED]"` in any
+    /// logged body. Case-insensitive, applied at every nesting depth.
+    /// Defaults cover common secret-bearing field names.
+    #[serde(default = "default_redact_body_fields")]
+    pub redact_body_fields: Vec<String>,
 }
 
 impl Default for LoggingConfig {
@@ -107,8 +132,33 @@ impl Default for LoggingConfig {
         Self {
             level: default_log_level(),
             format: default_log_format(),
+            access_log: true,
+            print_stack_trace: false,
+            max_body_bytes: default_max_body_bytes(),
+            redact_body_fields: default_redact_body_fields(),
         }
     }
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_max_body_bytes() -> usize {
+    2048
+}
+
+fn default_redact_body_fields() -> Vec<String> {
+    vec![
+        "password".into(),
+        "pass".into(),
+        "secret".into(),
+        "token".into(),
+        "access_token".into(),
+        "refresh_token".into(),
+        "api_key".into(),
+        "authorization".into(),
+    ]
 }
 
 /// Optional customisation for the generated OpenAPI 3.1 spec exposed

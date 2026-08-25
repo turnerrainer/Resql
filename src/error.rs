@@ -91,9 +91,31 @@ struct ErrorBody<'a> {
 
 impl IntoResponse for ResqlError {
     fn into_response(self) -> Response {
+        // Emit a structured log line for every error we return so
+        // operators see the failure alongside the response. Field
+        // names align with the OpenTelemetry HTTP semantic-conventions
+        // used by the request middleware; the source-chain toggle is
+        // handled by the middleware / handler that has config access
+        // (see `logging.print_stack_trace`).
+        let status_code = self.status().as_u16();
+        let kind = self.kind();
+        let message = self.to_string();
+        if status_code >= 500 {
+            tracing::error!(
+                error.kind = %kind,
+                http.response.status_code = status_code,
+                "{message}"
+            );
+        } else {
+            tracing::warn!(
+                error.kind = %kind,
+                http.response.status_code = status_code,
+                "{message}"
+            );
+        }
         let body = ErrorBody {
-            error: self.kind(),
-            message: self.to_string(),
+            error: kind,
+            message,
         };
         (self.status(), Json(body)).into_response()
     }

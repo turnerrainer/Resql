@@ -6,6 +6,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0-alpha.4] - 2026-08-26
+
+### Added — operator-grade logging (parity with Ruuter-on-Rust)
+- **Per-request access log** — one INFO line per completed request with OpenTelemetry HTTP semantic-convention fields: `http.request.method`, `http.route`, `http.response.status_code`, `duration_ms`, `resql.project`, `trace_id`. Toggle via `logging.access_log` (on by default).
+- **W3C `traceparent` propagation** — adopted verbatim from the caller, generated server-side when absent. Every request-scoped log line inherits the same 32-hex `trace_id`; the id is echoed back to callers via `X-Trace-Id` on every response (including 4xx/5xx). Correlate client and server logs without extra headers.
+- **Structured error logs** — every `ResqlError` returned as HTTP 400+ now emits a WARN (or ERROR for 5xx) line with `error.kind` (Java-canonical exception name) alongside the message. Same `trace_id` as the request span.
+- **CRLF-safe log values** — `logging::sanitize_log_value` runs on user-controlled fields before they hit a log line. Blocks log-line splicing via header or body payload.
+- **Body redaction toolkit** — `logging::redact::redact_json` / `redact_headers` replace configured field names with `"[REDACTED]"` (case-insensitive, at any depth). Defaults cover `password`, `token`, `authorization`, `api_key`, etc. New config keys: `logging.redact_body_fields`, `logging.max_body_bytes`, `logging.print_stack_trace`.
+- **Env-var overrides** — `RESQL_LOG_FORMAT=text|json` overrides `logging.format` at runtime so an operator can flip a running container without editing config. `RESQL_LOG` continues to override the level directive.
+- **JSON output** — the JSON layer now emits current-span context so downstream log stores see the request's `trace_id` / `resql.project` on every event.
+- Health probes (`/health`, `/healthz`) are excluded from the access log.
+- New chapter: `book/src/logging.md` — field vocabulary, config reference, redaction semantics, correlation recipes.
+
 ## [0.1.0-alpha.3] - 2026-08-26
 
 ### Added
@@ -104,7 +117,8 @@ Spring Boot service. Interface-compatible with the original for the SQL-file-to-
 - Container image signed with cosign keyless via GHA OIDC.
 - Trivy HIGH/CRITICAL scan gates image signing.
 
-[Unreleased]: https://github.com/turnerrainer/Resql/compare/v0.1.0-alpha.3...HEAD
+[Unreleased]: https://github.com/turnerrainer/Resql/compare/v0.1.0-alpha.4...HEAD
+[0.1.0-alpha.4]: https://github.com/turnerrainer/Resql/releases/tag/v0.1.0-alpha.4
 [0.1.0-alpha.3]: https://github.com/turnerrainer/Resql/releases/tag/v0.1.0-alpha.3
 [0.1.0-alpha.2]: https://github.com/turnerrainer/Resql/releases/tag/v0.1.0-alpha.2
 [0.1.0-alpha.1]: https://github.com/turnerrainer/Resql/releases/tag/v0.1.0-alpha.1

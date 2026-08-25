@@ -10,6 +10,7 @@ pub mod declaration;
 pub mod error;
 pub mod health;
 pub mod loader;
+pub mod logging;
 pub mod openapi;
 pub mod query;
 pub mod server;

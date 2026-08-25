@@ -1,20 +1,24 @@
 use std::sync::Arc;
+use std::time::Instant;
 
-use axum::extract::{Path, Query, State};
-use axum::http::HeaderMap;
+use axum::extract::{Path, Query, Request, State};
+use axum::http::{HeaderMap, HeaderName, HeaderValue};
+use axum::middleware::{self, Next};
+use axum::response::Response;
 use axum::routing::get;
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::limit::RequestBodyLimitLayer;
-use tower_http::trace::TraceLayer;
+use tracing::Instrument;
 
-use crate::config::Config;
+use crate::config::{Config, LoggingConfig};
 use crate::db::{DatasourceRegistry, SharedRegistry};
 use crate::error::ResqlError;
 use crate::health::{self, StartTime};
 use crate::loader::{HttpMethod, QueryIndex};
+use crate::logging::{generate_traceparent, sanitize_log_value, trace_id_from_traceparent};
 use crate::openapi;
 use crate::query;
 
@@ -35,6 +39,7 @@ pub struct AppState {
 pub fn router(state: AppState) -> Router {
     let cors = build_cors(&state.config.cors.allowed_origins);
     let body_limit = state.config.server.max_body_bytes;
+    let logging_for_layer = state.config.logging.clone();
 
     Router::new()
         .route("/health", get(health_handler))
@@ -44,8 +49,116 @@ pub fn router(state: AppState) -> Router {
         .route("/:project/*tail", get(query_get).post(query_post))
         .layer(cors)
         .layer(RequestBodyLimitLayer::new(body_limit))
-        .layer(TraceLayer::new_for_http())
+        .layer(middleware::from_fn(move |req, next| {
+            let cfg = logging_for_layer.clone();
+            request_observability(cfg, req, next)
+        }))
         .with_state(state)
+}
+
+const TRACEPARENT_HEADER: &str = "traceparent";
+const TRACE_ID_HEADER: &str = "x-trace-id";
+const HEALTHZ_PATH: &str = "/healthz";
+const HEALTH_PATH: &str = "/health";
+
+/// Per-request middleware — the single source of Resql's operational
+/// log surface. Responsibilities:
+///
+/// 1. Adopt any inbound W3C `traceparent`, or synthesise one so every
+///    request-scoped log line and the response carry a stable id.
+/// 2. Open a request span with OpenTelemetry HTTP semantic-convention
+///    fields (`http.request.method`, `http.route`, `client.address`,
+///    `resql.project`, `trace_id`) that every downstream `info!` /
+///    `warn!` / `error!` inherits.
+/// 3. After the handler completes: emit a single INFO access-log line
+///    with `http.response.status_code` + `duration_ms` (only when
+///    `logging.access_log` is on), and echo the trace id back as
+///    `X-Trace-Id` so callers can correlate.
+///
+/// Health probes are excluded from the access log — they'd bury the
+/// real traffic.
+async fn request_observability(cfg: LoggingConfig, mut req: Request, next: Next) -> Response {
+    let start = Instant::now();
+    let method_str = req.method().as_str().to_string();
+    let uri_path = req.uri().path().to_string();
+    let project_str = uri_path
+        .split('/')
+        .find(|s| !s.is_empty())
+        .unwrap_or("")
+        .to_string();
+
+    // Adopt or generate traceparent; inject back so any future
+    // header-reading code sees the resolved value.
+    let (traceparent_value, needed_injection) = match req
+        .headers()
+        .get(TRACEPARENT_HEADER)
+        .and_then(|v| v.to_str().ok())
+    {
+        Some(existing) => (existing.to_string(), false),
+        None => (generate_traceparent(), true),
+    };
+    if needed_injection {
+        if let Ok(hv) = HeaderValue::try_from(traceparent_value.as_str()) {
+            req.headers_mut()
+                .insert(HeaderName::from_static(TRACEPARENT_HEADER), hv);
+        }
+    }
+    let trace_id_str = trace_id_from_traceparent(&traceparent_value)
+        .unwrap_or("")
+        .to_string();
+
+    let request_span = tracing::info_span!(
+        "http_request",
+        http.request.method = %method_str,
+        http.route = %sanitize_log_value(&uri_path),
+        resql.project = %project_str,
+        trace_id = %trace_id_str,
+    );
+    let span_for_log = request_span.clone();
+
+    let mut response = next.run(req).instrument(request_span).await;
+
+    // Echo trace id back to caller so they can correlate their logs.
+    if !trace_id_str.is_empty() {
+        if let Ok(hv) = HeaderValue::try_from(trace_id_str.as_str()) {
+            response
+                .headers_mut()
+                .insert(HeaderName::from_static(TRACE_ID_HEADER), hv);
+        }
+    }
+
+    // Skip access log for health probes — they'd drown real traffic.
+    let is_health = uri_path == HEALTH_PATH || uri_path == HEALTHZ_PATH;
+    if cfg.access_log && !is_health {
+        let status = response.status().as_u16();
+        let duration_ms = start.elapsed().as_secs_f64() * 1000.0;
+        let _guard = span_for_log.enter();
+        // 5xx surfaces at WARN — it's operational noise if it's routine;
+        // an alert-worthy signal if it isn't. 4xx and 2xx are INFO.
+        if status >= 500 {
+            tracing::warn!(
+                http.request.method = %method_str,
+                http.route = %sanitize_log_value(&uri_path),
+                http.response.status_code = status,
+                duration_ms,
+                resql.project = %project_str,
+                trace_id = %trace_id_str,
+                "http request failed"
+            );
+        } else {
+            tracing::info!(
+                http.request.method = %method_str,
+                http.route = %sanitize_log_value(&uri_path),
+                http.response.status_code = status,
+                duration_ms,
+                resql.project = %project_str,
+                trace_id = %trace_id_str,
+                "http request completed"
+            );
+        }
+    }
+
+    response
 }
 
 async fn openapi_handler(State(state): State<AppState>) -> Json<Value> {
