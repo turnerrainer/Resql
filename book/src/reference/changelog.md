@@ -6,6 +6,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Multi-byte UTF-8 characters could be corrupted by the named-parameter rewriter.** `rewrite_named_params` walked the SQL text one byte at a time and cast each byte to `char` individually (`bytes[i] as char`). For any non-ASCII character encoded as 2–4 UTF-8 bytes (e.g. accented Latin like `Ä`/`õ`/`ü`, or Cyrillic), this reassembled the wrong Unicode scalar value byte-by-byte instead of treating the sequence as one character — silently corrupting the SQL text inside line comments (`-- ...`), block comments (`/* ... */`), string literals, and even bare SQL (e.g. a column alias), rather than raising an error. Fixed by detecting non-ASCII leading bytes and copying the whole UTF-8 sequence through verbatim (`copy_utf8_char`). Only affects SQL files containing non-ASCII text; purely-ASCII SQL is unaffected. Added 4 regression tests covering line comments, block comments, string literals, and bare SQL.
+
 ## [0.1.0-alpha.4] - 2026-08-26
 
 ### Added — operator-grade logging (parity with Ruuter-on-Rust)
