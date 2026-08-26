@@ -24,7 +24,7 @@ collection so it stays in sync:
 
 ```bash
 # Start Resql locally with your project's sql/ tree wired in.
-docker run --rm -p 8080:8080 turnerrainer/resql:0.1.0-alpha.4
+docker run --rm -p 8080:8080 turnerrainer/resql:0.1.1-alpha
 
 # Snapshot the live spec.
 curl -s http://localhost:8080/openapi.json \

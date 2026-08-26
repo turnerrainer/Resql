@@ -6,6 +6,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1-alpha] - 2026-08-27
+
+Bug-fix release. Four Postgres correctness fixes that were silently returning `null` or corrupting the connection in the previous alpha. Also: **versioning scheme shift** — from now on the alpha series increments PATCH per release (`0.1.1-alpha`, `0.1.2-alpha`, …) instead of an alpha counter under a single target version (`0.1.0-alpha.N`). RC series will begin at `1.0.0-rc.1`; there will be no stable `0.1.0` release.
+
 ### Fixed
 - **`bind_pg` now types every Postgres parameter by its declared `ParamType`, not the incoming JSON shape.** sqlx caches prepared statements per SQL text on a connection: the first `Parse` fixes each `$N` slot's OID, and every later execution against that cached statement must bind the same OID or Postgres re-interprets the wire bytes under the cached type (e.g. an `i64`'s binary bytes read as text → `invalid byte sequence for encoding "UTF8": 0x00`). Previously `bind_pg` bound `Value::Null` as `Option::<String>::None` (pinning the slot to text) but `Value::Number` natively as `i64`/`f64`, so any endpoint with an optional numeric param — `null` on one call, a real number on a later call, same connection — corrupted the request with a `BadSqlGrammarException`. The fix drives the bind Rust type off `DeclaredParam.ty`, so both null and non-null bindings for the same param use the same OID regardless of the JSON value's shape; existing SQL like `WHERE id = :id` (native i64 bind, no explicit cast) keeps working. Diagnosis and reproduction (`pg_number_after_null_on_same_cached_statement_does_not_corrupt`) originally by @Aljoxa88 in [#7](https://github.com/turnerrainer/Resql/pull/7).
 - **Multi-byte UTF-8 characters could be corrupted by the named-parameter rewriter.** `rewrite_named_params` walked the SQL text one byte at a time and cast each byte to `char` individually (`bytes[i] as char`). For any non-ASCII character encoded as 2–4 UTF-8 bytes (e.g. accented Latin like `Ä`/`õ`/`ü`, or Cyrillic), this reassembled the wrong Unicode scalar value byte-by-byte instead of treating the sequence as one character — silently corrupting the SQL text inside line comments (`-- ...`), block comments (`/* ... */`), string literals, and even bare SQL (e.g. a column alias), rather than raising an error. Fixed by detecting non-ASCII leading bytes and copying the whole UTF-8 sequence through verbatim (`copy_utf8_char`). Only affects SQL files containing non-ASCII text; purely-ASCII SQL is unaffected. Added 4 regression tests covering line comments, block comments, string literals, and bare SQL. ([#5](https://github.com/turnerrainer/Resql/pull/5))
@@ -123,7 +127,8 @@ Spring Boot service. Interface-compatible with the original for the SQL-file-to-
 - Container image signed with cosign keyless via GHA OIDC.
 - Trivy HIGH/CRITICAL scan gates image signing.
 
-[Unreleased]: https://github.com/turnerrainer/Resql/compare/v0.1.0-alpha.4...HEAD
+[Unreleased]: https://github.com/turnerrainer/Resql/compare/v0.1.1-alpha...HEAD
+[0.1.1-alpha]: https://github.com/turnerrainer/Resql/releases/tag/v0.1.1-alpha
 [0.1.0-alpha.4]: https://github.com/turnerrainer/Resql/releases/tag/v0.1.0-alpha.4
 [0.1.0-alpha.3]: https://github.com/turnerrainer/Resql/releases/tag/v0.1.0-alpha.3
 [0.1.0-alpha.2]: https://github.com/turnerrainer/Resql/releases/tag/v0.1.0-alpha.2

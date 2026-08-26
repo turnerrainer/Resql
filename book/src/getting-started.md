@@ -9,7 +9,7 @@ Use one of the two officially supported paths:
 **Docker** (recommended):
 
 ```bash
-docker pull turnerrainer/resql:0.1.0-alpha.4
+docker pull turnerrainer/resql:0.1.1-alpha
 ```
 
 **From source** (Rust 1.88+):
@@ -25,7 +25,7 @@ The built binary is at `target/release/resql`.
 ## 2. Run the demo
 
 ```bash
-docker run --rm -p 8080:8080 turnerrainer/resql:0.1.0-alpha.4
+docker run --rm -p 8080:8080 turnerrainer/resql:0.1.1-alpha
 ```
 
 From source:
@@ -108,7 +108,7 @@ docker run --rm -p 8080:8080 \
   -v "$PWD/mysql:/app/sql:ro" \
   -v "$PWD/resql.yaml:/app/resql.yaml:ro" \
   -e USERS_DB_PASSWORD="secret" \
-  turnerrainer/resql:0.1.0-alpha.4
+  turnerrainer/resql:0.1.1-alpha
 ```
 
 Where `resql.yaml` (see [Configuration](./configuration.md) for the full
