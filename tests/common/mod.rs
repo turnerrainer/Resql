@@ -131,8 +131,17 @@ impl TestAppBuilder {
             });
         }
         for (name, url) in &self.pg_datasources {
+            // Pool pinned to one connection so cached-prepared-statement
+            // reuse is deterministic across sequential requests to the
+            // same endpoint. The suite is not concurrent, and a single-
+            // connection pool guarantees both calls in tests like
+            // `pg_number_after_null_on_same_cached_statement_does_not_corrupt`
+            // land on the same physical connection — reproducing
+            // bind-type stability bugs that only surface when a
+            // subsequent call hits the same cached `Parse` as an earlier
+            // one.
             let pool_inner = PgPoolOptions::new()
-                .max_connections(4)
+                .max_connections(1)
                 .connect(url)
                 .await
                 .unwrap_or_else(|e| {
@@ -145,7 +154,7 @@ impl TestAppBuilder {
                 username: "".into(),
                 password_env: "".into(),
                 password: None,
-                max_connections: 4,
+                max_connections: 1,
                 acquire_timeout_seconds: 5,
             });
         }

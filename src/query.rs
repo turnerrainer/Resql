@@ -180,7 +180,7 @@ pub async fn execute(
     let param_map = validate_params(declaration, raw_map)?;
 
     match pool {
-        Pool::Postgres(pg) => run_pg(pg, &rewritten, &param_names, &param_map).await,
+        Pool::Postgres(pg) => run_pg(pg, &rewritten, &param_names, &param_map, declaration).await,
         Pool::Sqlite(sq) => run_sqlite(sq, &rewritten, &param_names, &param_map).await,
     }
 }
@@ -202,7 +202,7 @@ pub async fn execute_transactional(
     match pool {
         Pool::Postgres(pg) => {
             let mut tx = pg.begin().await.map_err(sql_err)?;
-            let result = run_pg(&mut *tx, &rewritten, &param_names, &param_map).await;
+            let result = run_pg(&mut *tx, &rewritten, &param_names, &param_map, declaration).await;
             finalise_tx(tx, result).await
         }
         Pool::Sqlite(sq) => {
@@ -238,7 +238,7 @@ pub async fn execute_batch(
             let mut tx = pg.begin().await.map_err(sql_err)?;
             let mut all = Vec::with_capacity(normalised.len());
             for pm in &normalised {
-                match run_pg(&mut *tx, &rewritten, &param_names, pm).await {
+                match run_pg(&mut *tx, &rewritten, &param_names, pm, declaration).await {
                     Ok(rows) => all.push(rows),
                     Err(e) => {
                         let _ = tx.rollback().await;
@@ -468,6 +468,7 @@ async fn run_pg<'e, E>(
     sql: &str,
     names: &[String],
     params: &Map<String, Value>,
+    declaration: &Declaration,
 ) -> Result<Vec<Map<String, Value>>, ResqlError>
 where
     E: sqlx::Executor<'e, Database = sqlx::Postgres>,
@@ -475,7 +476,17 @@ where
     let mut q = sqlx::query(sql);
     for name in names {
         let v = params.get(name).cloned().unwrap_or(Value::Null);
-        q = bind_pg(q, v);
+        // Declared type drives the wire OID. `validate_params` guarantees
+        // every `name` in `names` is a declared param (SQL that references
+        // an undeclared `:name` fails at boot, so the runtime never sees
+        // one here) — the `String` fallback exists only to satisfy the
+        // type-checker; it is unreachable at run time.
+        let declared_ty = declaration
+            .params
+            .get(name)
+            .map(|p| p.ty)
+            .unwrap_or(ParamType::String);
+        q = bind_pg(q, v, declared_ty);
     }
     let rows = q.fetch_all(exec).await.map_err(sql_err)?;
     Ok(rows.iter().map(pg_row_to_json).collect())
@@ -499,27 +510,59 @@ where
     Ok(rows.iter().map(sqlite_row_to_json).collect())
 }
 
+/// Bind one JSON value into a Postgres query at the position of the next
+/// unbound placeholder.
+///
+/// The Rust bind type is chosen by the **declared** `ParamType`, never by
+/// the shape of the incoming JSON value. sqlx-postgres caches prepared
+/// statements per SQL text on a connection: the first `Parse` fixes each
+/// `$N` placeholder's type from the bind's OID, and later executions
+/// against that same cached statement must bind the same OID or Postgres
+/// interprets the wire bytes as the cached type (e.g. an `i64`'s binary
+/// bytes as text → `invalid byte sequence for encoding "UTF8": 0x00`).
+///
+/// Binding by declared type keeps the OID invariant across every call for
+/// a given endpoint: an `integer` param binds as `i8[i64]` whether the
+/// caller sends `null`, `42`, or omits it (validated + defaulted upstream);
+/// a `string` param binds as `text[String]`; etc. The declaration is the
+/// single source of truth for wire typing.
 fn bind_pg<'q>(
     q: sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments>,
     v: Value,
+    declared_ty: ParamType,
 ) -> sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments> {
-    match v {
-        Value::Null => q.bind(Option::<String>::None),
-        Value::Bool(b) => q.bind(b),
-        Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                q.bind(i)
-            } else if let Some(u) = n.as_u64() {
-                q.bind(u as i64)
-            } else if let Some(f) = n.as_f64() {
-                q.bind(f)
-            } else {
-                q.bind(n.to_string())
-            }
-        }
-        Value::String(s) => q.bind(s),
-        Value::Array(items) => bind_pg_array(q, items),
-        Value::Object(_) => q.bind(sqlx::types::Json(v)),
+    match declared_ty {
+        ParamType::String | ParamType::Date | ParamType::Datetime | ParamType::Uuid => match v {
+            Value::Null => q.bind(Option::<String>::None),
+            Value::String(s) => q.bind(s),
+            // Unreachable: validate_params coerces to string family.
+            other => q.bind(other.to_string()),
+        },
+        ParamType::Integer => match v {
+            Value::Null => q.bind(Option::<i64>::None),
+            Value::Number(n) => q.bind(n.as_i64().unwrap_or_default()),
+            // Unreachable: validate_params coerces to integer.
+            _ => q.bind(Option::<i64>::None),
+        },
+        ParamType::Number => match v {
+            Value::Null => q.bind(Option::<f64>::None),
+            Value::Number(n) => q.bind(n.as_f64().unwrap_or_default()),
+            _ => q.bind(Option::<f64>::None),
+        },
+        ParamType::Boolean => match v {
+            Value::Null => q.bind(Option::<bool>::None),
+            Value::Bool(b) => q.bind(b),
+            _ => q.bind(Option::<bool>::None),
+        },
+        ParamType::Array => match v {
+            Value::Null => q.bind(Option::<sqlx::types::Json<Value>>::None),
+            Value::Array(items) => bind_pg_array(q, items),
+            other => q.bind(sqlx::types::Json(other)),
+        },
+        ParamType::Object => match v {
+            Value::Null => q.bind(Option::<sqlx::types::Json<Value>>::None),
+            other => q.bind(sqlx::types::Json(other)),
+        },
     }
 }
 
