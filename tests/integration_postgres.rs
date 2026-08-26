@@ -98,6 +98,10 @@ async fn app_with_pg(url: &str) -> common::TestApp {
             "pg/GET/time/naked-timestamptz.sql",
             "SELECT TIMESTAMP WITH TIME ZONE '2026-01-01 10:20:30+00' AS ts",
         )
+        .with_sql(
+            "pg/GET/time/naked-time.sql",
+            "SELECT TIME '10:20:30' AS t",
+        )
         .build()
         .await
 }
@@ -175,6 +179,22 @@ async fn pg_timestamptz_literal_uses_iso_z_suffix() {
     assert_eq!(status, 200);
     // TIMESTAMPTZ at UTC: exact `...Z` form, not `+00:00` (issue #3).
     assert_eq!(body[0]["ts"], "2026-01-01T10:20:30Z");
+}
+
+/// A plain `TIME WITHOUT TIME ZONE` column matches none of the
+/// `NaiveDateTime`/`DateTime<Utc>`/`NaiveDate` decode attempts in
+/// `pg_column_value`'s timestamp/date branch. Without a dedicated
+/// `NaiveTime` fallback, a non-NULL `TIME` value silently comes back as
+/// JSON `null` instead of the actual time (the "explicit NULL detection"
+/// and "last-resort text" fallbacks both also fail to decode `TIME` as
+/// `String`, so the column is misreported as null rather than erroring).
+#[tokio::test]
+async fn pg_naked_time_column_decodes_as_string() {
+    let url = require_pg!();
+    let app = app_with_pg(&url).await;
+    let (status, body) = app.request("GET", "/pg/time/naked-time", None, &[]).await;
+    assert_eq!(status, 200);
+    assert_eq!(body[0]["t"], "10:20:30");
 }
 
 #[tokio::test]

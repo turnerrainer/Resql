@@ -6,6 +6,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **`TIME` (without time zone) columns silently came back as `null` instead of their value.** `pg_column_value`'s timestamp/date branch tried `NaiveDateTime`, `DateTime<Utc>`, and `NaiveDate` decodes, none of which match a bare `TIME` column, and the subsequent fallbacks (`try_get::<Option<String>>`) also fail to decode a Postgres `TIME` value as a Rust `String` -- so a non-NULL `TIME` value was misreported as JSON `null` rather than erroring or returning the actual time. Fixed by adding a `chrono::NaiveTime` decode attempt alongside the existing date/timestamp ones; `TIME` columns now come back as `"HH:MM:SS[.ffffff]"` strings, consistent with how `DATE` is already rendered. Added a regression test (`pg_naked_time_column_decodes_as_string`).
+
 ## [0.1.0-alpha.4] - 2026-08-26
 
 ### Added — operator-grade logging (parity with Ruuter-on-Rust)
