@@ -6,6 +6,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **`smallint[]`/`integer[]` and `varchar[]`/`bpchar[]`/`char[]`/`name[]`/`citext[]` array columns silently came back as `null`.** `pg_column_value` only ever attempted `Vec<String>` for `TEXT[]` and a single `Vec<i64>` for every integer array type; sqlx requires the exact Rust integer width to match the Postgres array's element width (`int2[]` only decodes as `Vec<i16>`, `int4[]` only as `Vec<i32>`, `int8[]` only as `Vec<i64>`), so only `bigint[]`/`int8[]` columns ever actually decoded -- `smallint[]` and `integer[]` silently fell through every branch to `null`. Likewise, only `TEXT[]` was covered by the text-array branch; `VARCHAR[]`, `BPCHAR[]`/`CHAR[]`, `NAME[]`, and `CITEXT[]` arrays fell through the same way. Fixed by widening both branches to cover the full character-type family (text-as-`Vec<String>`) and each integer width (`int2[]`/`int4[]`/`int8[]`, all widened to `i64` for JSON). Added 5 regression tests covering `smallint[]`, `integer[]`, `varchar[]`, and `char[]` (plus a guard test confirming `bigint[]`, which already worked, keeps working).
+
 ## [0.1.0-alpha.4] - 2026-08-26
 
 ### Added — operator-grade logging (parity with Ruuter-on-Rust)

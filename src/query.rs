@@ -717,13 +717,64 @@ fn pg_column_value(row: &PgRow, idx: usize, ty: &str) -> Value {
             return Value::String(v.to_string());
         }
     }
-    // Text array — best-effort as string list.
-    if ty_upper.starts_with("_TEXT") || ty_upper == "TEXT[]" {
+    // Text-family array — best-effort as a string list. Covers every
+    // Postgres character type's array form, not just TEXT[]: VARCHAR[],
+    // BPCHAR[]/CHAR[], NAME[], and CITEXT[] all decode into Rust as
+    // Vec<String> via sqlx, but were previously left to fall through to
+    // the (always-failing, for arrays) Vec<i64> attempt below and come
+    // back as null.
+    if ty_upper.starts_with("_TEXT")
+        || ty_upper.starts_with("_VARCHAR")
+        || ty_upper.starts_with("_BPCHAR")
+        || ty_upper.starts_with("_NAME")
+        || ty_upper.starts_with("_CITEXT")
+        || ty_upper == "TEXT[]"
+        || ty_upper == "VARCHAR[]"
+        || ty_upper == "CHAR[]"
+        || ty_upper == "BPCHAR[]"
+        || ty_upper == "NAME[]"
+        || ty_upper == "CITEXT[]"
+    {
         if let Ok(Some(v)) = row.try_get::<Option<Vec<String>>, _>(idx) {
             return Value::Array(v.into_iter().map(Value::String).collect());
         }
     }
-    if ty_upper.starts_with("_INT") || ty_upper.ends_with("[]") {
+    // Integer-family arrays: sqlx requires the Rust element width to
+    // exactly match the Postgres array's element width (int2[] only
+    // decodes as Vec<i16>, int4[] only as Vec<i32>, int8[] only as
+    // Vec<i64>) — a single `Vec<i64>` attempt only ever matched int8[],
+    // silently returning null for smallint[]/integer[] columns (the
+    // `try_get` fails and every branch above and below it also fails to
+    // decode a non-text array as a String). Try each width in turn and
+    // widen the result to i64 for JSON, which has no i16/i32/i64
+    // distinction.
+    if ty_upper.starts_with("_INT2") || ty_upper == "INT2[]" || ty_upper == "SMALLINT[]" {
+        if let Ok(Some(v)) = row.try_get::<Option<Vec<i16>>, _>(idx) {
+            return Value::Array(
+                v.into_iter()
+                    .map(|i| Value::Number(i64::from(i).into()))
+                    .collect(),
+            );
+        }
+    }
+    if ty_upper.starts_with("_INT4")
+        || ty_upper == "INT4[]"
+        || ty_upper == "INT[]"
+        || ty_upper == "INTEGER[]"
+    {
+        if let Ok(Some(v)) = row.try_get::<Option<Vec<i32>>, _>(idx) {
+            return Value::Array(
+                v.into_iter()
+                    .map(|i| Value::Number(i64::from(i).into()))
+                    .collect(),
+            );
+        }
+    }
+    if ty_upper.starts_with("_INT8")
+        || ty_upper == "INT8[]"
+        || ty_upper == "BIGINT[]"
+        || ty_upper.ends_with("[]")
+    {
         if let Ok(Some(v)) = row.try_get::<Option<Vec<i64>>, _>(idx) {
             return Value::Array(v.into_iter().map(|i| Value::Number(i.into())).collect());
         }

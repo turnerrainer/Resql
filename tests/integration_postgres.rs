@@ -512,6 +512,26 @@ async fn app_with_arrays(url: &str) -> common::TestApp {
             // out with unnest into a real INSERT ... SELECT.
             "/*\nparams:\n  actors:  { type: array, required: true, items: { type: string } }\n  actions: { type: array, required: true, items: { type: string } }\n*/\nINSERT INTO audit_log (actor, action) SELECT unnest(:actors), unnest(:actions) RETURNING id, actor, action",
         )
+        .with_sql(
+            "pg/GET/arrays/smallint-column.sql",
+            "SELECT ARRAY[1,2,3]::SMALLINT[] AS xs",
+        )
+        .with_sql(
+            "pg/GET/arrays/integer-column.sql",
+            "SELECT ARRAY[10,20,30]::INTEGER[] AS xs",
+        )
+        .with_sql(
+            "pg/GET/arrays/bigint-column.sql",
+            "SELECT ARRAY[100,200,300]::BIGINT[] AS xs",
+        )
+        .with_sql(
+            "pg/GET/arrays/varchar-column.sql",
+            "SELECT ARRAY['a','b','c']::VARCHAR[] AS xs",
+        )
+        .with_sql(
+            "pg/GET/arrays/bpchar-column.sql",
+            "SELECT ARRAY['a','b']::CHAR(1)[] AS xs",
+        )
         .build()
         .await
 }
@@ -615,6 +635,74 @@ async fn pg_heterogeneous_array_falls_back_to_jsonb() {
         .await;
     assert_eq!(status, 200);
     assert_eq!(body[0]["len"], 3);
+}
+
+/// `pg_column_value` only ever attempted `Vec<i64>` for integer-family
+/// arrays, which sqlx only decodes successfully for `int8[]` (the exact
+/// Rust width must match the Postgres array's element width). A
+/// `smallint[]`/`integer[]` column's `try_get::<Option<Vec<i64>>>` fails,
+/// and every other branch also fails to decode a non-text array as a
+/// `String`, so the column was silently misreported as JSON `null`.
+#[tokio::test]
+async fn pg_smallint_array_column_decodes() {
+    let url = require_pg!();
+    let app = app_with_arrays(&url).await;
+    let (status, body) = app
+        .request("GET", "/pg/arrays/smallint-column", None, &[])
+        .await;
+    assert_eq!(status, 200);
+    assert_eq!(body[0]["xs"], json!([1, 2, 3]));
+}
+
+#[tokio::test]
+async fn pg_integer_array_column_decodes() {
+    let url = require_pg!();
+    let app = app_with_arrays(&url).await;
+    let (status, body) = app
+        .request("GET", "/pg/arrays/integer-column", None, &[])
+        .await;
+    assert_eq!(status, 200);
+    assert_eq!(body[0]["xs"], json!([10, 20, 30]));
+}
+
+#[tokio::test]
+async fn pg_bigint_array_column_still_decodes() {
+    // int8[] already worked before this fix; guards against regressing it
+    // while widening the int2[]/int4[] handling above.
+    let url = require_pg!();
+    let app = app_with_arrays(&url).await;
+    let (status, body) = app
+        .request("GET", "/pg/arrays/bigint-column", None, &[])
+        .await;
+    assert_eq!(status, 200);
+    assert_eq!(body[0]["xs"], json!([100, 200, 300]));
+}
+
+/// Only `TEXT[]` was covered by the text-array branch; `VARCHAR[]` (and
+/// `BPCHAR[]`/`CHAR[]`, `NAME[]`, `CITEXT[]`) fell through to the
+/// integer-array attempt (which fails to decode a text array) and then to
+/// the string fallbacks (which fail to decode any array as a scalar
+/// `String`), silently coming back as JSON `null`.
+#[tokio::test]
+async fn pg_varchar_array_column_decodes() {
+    let url = require_pg!();
+    let app = app_with_arrays(&url).await;
+    let (status, body) = app
+        .request("GET", "/pg/arrays/varchar-column", None, &[])
+        .await;
+    assert_eq!(status, 200);
+    assert_eq!(body[0]["xs"], json!(["a", "b", "c"]));
+}
+
+#[tokio::test]
+async fn pg_bpchar_array_column_decodes() {
+    let url = require_pg!();
+    let app = app_with_arrays(&url).await;
+    let (status, body) = app
+        .request("GET", "/pg/arrays/bpchar-column", None, &[])
+        .await;
+    assert_eq!(status, 200);
+    assert_eq!(body[0]["xs"], json!(["a", "b"]));
 }
 
 #[tokio::test]
