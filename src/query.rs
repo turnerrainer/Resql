@@ -21,13 +21,31 @@ pub fn rewrite_named_params(sql: &str, dialect: Dialect) -> (String, Vec<String>
     let n = bytes.len();
 
     while i < n {
-        let c = bytes[i] as char;
+        let b = bytes[i];
+
+        // Non-ASCII byte — part of a multi-byte UTF-8 sequence. All the
+        // delimiters this parser looks for (`:`, `'`, `"`, `-`, `/`, `*`)
+        // are ASCII, so a non-ASCII leading byte can never start one of
+        // them; copy the whole character through verbatim rather than
+        // truncating it to its first byte via `as char` (see
+        // `copy_utf8_char` for why the naive per-byte cast corrupts
+        // multi-byte characters).
+        if !b.is_ascii() {
+            i = copy_utf8_char(sql, bytes, i, n, &mut out);
+            continue;
+        }
+
+        let c = b as char;
 
         // Line comment
         if c == '-' && i + 1 < n && bytes[i + 1] == b'-' {
             while i < n && bytes[i] != b'\n' {
-                out.push(bytes[i] as char);
-                i += 1;
+                if !bytes[i].is_ascii() {
+                    i = copy_utf8_char(sql, bytes, i, n, &mut out);
+                } else {
+                    out.push(bytes[i] as char);
+                    i += 1;
+                }
             }
             continue;
         }
@@ -36,8 +54,12 @@ pub fn rewrite_named_params(sql: &str, dialect: Dialect) -> (String, Vec<String>
             out.push_str("/*");
             i += 2;
             while i + 1 < n && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
-                out.push(bytes[i] as char);
-                i += 1;
+                if !bytes[i].is_ascii() {
+                    i = copy_utf8_char(sql, bytes, i, n, &mut out);
+                } else {
+                    out.push(bytes[i] as char);
+                    i += 1;
+                }
             }
             if i + 1 < n {
                 out.push_str("*/");
@@ -51,6 +73,10 @@ pub fn rewrite_named_params(sql: &str, dialect: Dialect) -> (String, Vec<String>
             out.push(quote);
             i += 1;
             while i < n {
+                if !bytes[i].is_ascii() {
+                    i = copy_utf8_char(sql, bytes, i, n, &mut out);
+                    continue;
+                }
                 let ch = bytes[i] as char;
                 out.push(ch);
                 i += 1;
@@ -97,6 +123,22 @@ pub fn rewrite_named_params(sql: &str, dialect: Dialect) -> (String, Vec<String>
         i += 1;
     }
     (out, params)
+}
+
+/// Copy one complete UTF-8 character starting at `sql[pos..]` into `out`,
+/// returning the byte position just past it. The leading byte's high bits
+/// determine the sequence length per RFC 3629 (2/3/4 bytes); this parser
+/// never needs to inspect the character's value, only preserve it intact,
+/// so no decoding beyond "how many bytes does this sequence span" is done.
+fn copy_utf8_char(sql: &str, bytes: &[u8], pos: usize, len: usize, out: &mut String) -> usize {
+    let seq_len = match bytes[pos] & 0xF0 {
+        0xC0 | 0xD0 => 2,
+        0xE0 => 3,
+        _ => 4,
+    };
+    let end = (pos + seq_len).min(len);
+    out.push_str(&sql[pos..end]);
+    end
 }
 
 fn is_ident_start(c: char) -> bool {
@@ -870,6 +912,44 @@ mod tests {
             rewrite_named_params("SELECT 'it''s :fake' AS a, :real AS b", Dialect::Postgres);
         assert_eq!(sql, "SELECT 'it''s :fake' AS a, $1 AS b");
         assert_eq!(params, vec!["real"]);
+    }
+
+    #[test]
+    fn rewrite_preserves_non_ascii_in_line_comment() {
+        // Multi-byte UTF-8 (accented Latin, Cyrillic, ...) in a line
+        // comment must pass through byte-for-byte, not get truncated to
+        // its leading byte by a per-byte `as char` cast.
+        let (sql, params) = rewrite_named_params("-- Описание: Ä\nSELECT :x", Dialect::Postgres);
+        assert_eq!(sql, "-- Описание: Ä\nSELECT $1");
+        assert_eq!(params, vec!["x"]);
+    }
+
+    #[test]
+    fn rewrite_preserves_non_ascii_in_block_comment() {
+        let (sql, params) = rewrite_named_params("/* kirjeldus: Ä */ SELECT :x", Dialect::Postgres);
+        assert_eq!(sql, "/* kirjeldus: Ä */ SELECT $1");
+        assert_eq!(params, vec!["x"]);
+    }
+
+    #[test]
+    fn rewrite_preserves_non_ascii_in_string_literal() {
+        // U+00C4 (Ä) encodes as the two bytes 0xC3 0x84. A byte-by-byte
+        // `as char` cast on 0xC3 produces U+00C3 (Ã), then 0x84 becomes a
+        // stray C1 control character — silently corrupting the literal
+        // instead of erroring, which is worse.
+        let (sql, _) =
+            rewrite_named_params("SELECT COALESCE(:x, 'ÄRALANGEMISENI')", Dialect::Postgres);
+        assert_eq!(sql, "SELECT COALESCE($1, 'ÄRALANGEMISENI')");
+        let idx = sql.find('Ä').expect("Ä must survive intact");
+        assert_eq!(&sql.as_bytes()[idx..idx + 2], &[0xC3, 0x84]);
+    }
+
+    #[test]
+    fn rewrite_preserves_non_ascii_in_bare_sql() {
+        // Non-ASCII outside any of the special contexts above (e.g. a
+        // literal used as a column alias) must also survive.
+        let (sql, _) = rewrite_named_params("SELECT :x AS nimi_üürikas", Dialect::Postgres);
+        assert!(sql.contains("nimi_üürikas"));
     }
 
     #[test]
