@@ -752,6 +752,15 @@ fn pg_column_value(row: &PgRow, idx: usize, ty: &str) -> Value {
         if let Ok(Some(v)) = row.try_get::<Option<chrono::NaiveDate>, _>(idx) {
             return Value::String(v.to_string());
         }
+        // Plain TIME (WITHOUT TIME ZONE): none of the DateTime/Date
+        // decodes above match a bare NaiveTime column, so without this
+        // fallback a non-NULL TIME value falls through to the "explicit
+        // NULL detection" probe below (which also fails, since TIME
+        // doesn't decode as String either) and is silently reported as
+        // JSON null instead of erroring or returning the actual value.
+        if let Ok(Some(v)) = row.try_get::<Option<chrono::NaiveTime>, _>(idx) {
+            return Value::String(v.to_string());
+        }
     }
     // UUID
     if ty_upper == "UUID" {
