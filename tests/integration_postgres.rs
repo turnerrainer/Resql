@@ -87,6 +87,10 @@ async fn app_with_pg(url: &str) -> common::TestApp {
             "/*\nparams:\n  login: { type: string, required: true }\n*/\nSELECT :login AS login",
         )
         .with_sql(
+            "pg/POST/typechecks/maybe-number.sql",
+            "/*\nparams:\n  maybe: { type: integer, required: false }\n*/\nSELECT :maybe IS NULL AS is_null, :maybe AS resolved",
+        )
+        .with_sql(
             "pg/POST/typechecks/bad-grammar.sql",
             "SELECT * FROM definitely_not_a_table",
         )
@@ -379,6 +383,58 @@ async fn pg_null_param_is_null() {
     assert_eq!(status, 200);
     assert_eq!(body[0]["isNull"], true);
     assert_eq!(body[0]["resolved"], "fallback");
+}
+
+/// Guards against a connection-corrupting regression in `bind_pg`.
+/// sqlx-postgres caches prepared statements per SQL text on a connection,
+/// and Postgres fixes each `$N` placeholder's type on the *first* `Parse`
+/// of the cached statement. An optional `integer`/`number` param that is
+/// `null` on one call and a real number on a later call — both against
+/// the *same* cached statement on the *same* connection — must not
+/// corrupt the connection.
+///
+/// Previously `bind_pg` bound `Value::Null` as `Option::<String>::None`
+/// (pinning the slot to text) and `Value::Number` natively as `i64/f64`
+/// (binary). Later `i64` bytes going into a text-typed slot surfaced as
+/// `invalid byte sequence for encoding "UTF8": 0x00` with a 400
+/// `BadSqlGrammarException`. The fix binds by declared type so both
+/// null and non-null bindings for the same param use the same OID.
+///
+/// Reproduction requires both calls to land on the same physical
+/// connection. The test pool is pinned to `max_connections=1` (see
+/// `tests/common/mod.rs::build`) so this reproduces deterministically —
+/// with a multi-connection pool it would only reproduce probabilistically.
+///
+/// Diagnosis originally by @Aljoxa88 in [#7]; landed via the
+/// declaration-typed-null fix, which keeps the native integer bind so
+/// existing SQL like `WHERE id = :id` (no explicit cast) still works.
+#[tokio::test]
+async fn pg_number_after_null_on_same_cached_statement_does_not_corrupt() {
+    let url = require_pg!();
+    let app = app_with_pg(&url).await;
+
+    let (status1, body1) = app
+        .request("POST", "/pg/typechecks/maybe-number", Some("{}"), &[])
+        .await;
+    assert_eq!(status1, 200, "first (null) call failed: {body1}");
+    assert_eq!(body1[0]["isNull"], true);
+    assert!(body1[0]["resolved"].is_null());
+
+    let (status2, body2) = app
+        .request(
+            "POST",
+            "/pg/typechecks/maybe-number",
+            Some(r#"{"maybe": 42}"#),
+            &[],
+        )
+        .await;
+    assert_eq!(
+        status2, 200,
+        "second (number) call on the same cached statement must not \
+         corrupt the connection; got {status2}: {body2}"
+    );
+    assert_eq!(body2[0]["isNull"], false);
+    assert_eq!(body2[0]["resolved"], 42);
 }
 
 // ─── Errors ───────────────────────────────────────────────────────────
