@@ -87,6 +87,17 @@ async fn app_with_pg(url: &str) -> common::TestApp {
             "/*\nparams:\n  login: { type: string, required: true }\n*/\nSELECT :login AS login",
         )
         .with_sql(
+            "pg/POST/typechecks/maybe-number.sql",
+            "/*\nparams:\n  maybe: { type: integer, required: false }\n*/\nSELECT :maybe IS NULL AS is_null, :maybe::INTEGER AS resolved",
+        )
+        .with_sql(
+            "pg/POST/orders/create.sql",
+            "/*\nparams:\n  login: { type: string, required: true }\n  total_cents: { type: integer, required: true }\n  items: { type: array, required: true }\n*/\n\
+             INSERT INTO orders (user_id, total_cents, items) \
+             VALUES ((SELECT id FROM users WHERE login = :login), :total_cents::INTEGER, :items) \
+             RETURNING id, user_id, total_cents, items",
+        )
+        .with_sql(
             "pg/POST/typechecks/bad-grammar.sql",
             "SELECT * FROM definitely_not_a_table",
         )
@@ -267,6 +278,51 @@ async fn pg_insert_returning_new_row() {
     assert!(row["id"].is_number());
 }
 
+/// Documents the correct DSL-side fix for inserting a JSON number into a
+/// plain `INTEGER` column: an explicit `::INTEGER` cast, exactly like
+/// every other numeric-column example in this codebase. Since `bind_pg`
+/// binds JSON numbers as text (see its doc comment), a bare
+/// `INSERT ... VALUES (:n, ...)` against an `INTEGER` column with no
+/// cast fails with `column "n" is of type integer but expression is of
+/// type text` -- that failure is expected and correct; this test asserts
+/// the supported shape (with the cast) succeeds.
+#[tokio::test]
+async fn pg_insert_number_into_integer_column_with_explicit_cast() {
+    let url = require_pg!();
+    let app = app_with_pg(&url).await;
+    let payload = json!({
+        "login": format!("orderuser_{}", uuid()),
+        "email": "orders@example.com",
+        "status": "active",
+    });
+    let (status, body) = app
+        .request("POST", "/pg/users/create", Some(&payload.to_string()), &[])
+        .await;
+    assert_eq!(status, 200);
+    let login = body[0]["login"].as_str().unwrap().to_string();
+
+    let order_payload = json!({
+        "login": login,
+        "total_cents": 1500,
+        "items": [{"sku": "X1", "qty": 1}],
+    });
+    let (status, body) = app
+        .request(
+            "POST",
+            "/pg/orders/create",
+            Some(&order_payload.to_string()),
+            &[],
+        )
+        .await;
+    assert_eq!(
+        status, 200,
+        "INSERT of a JSON number into an INTEGER column, with an explicit \
+         ::INTEGER cast on the SQL side, must succeed; got {status}: {body}"
+    );
+    let row = &body.as_array().unwrap()[0];
+    assert_eq!(row["totalCents"], 1500);
+}
+
 #[tokio::test]
 async fn pg_insert_with_null_email_ok() {
     let url = require_pg!();
@@ -359,6 +415,51 @@ async fn pg_null_param_is_null() {
     assert_eq!(status, 200);
     assert_eq!(body[0]["isNull"], true);
     assert_eq!(body[0]["resolved"], "fallback");
+}
+
+/// Guards against a connection-corrupting regression in `bind_pg`: sqlx
+/// caches prepared statements per SQL text on a connection, and Postgres
+/// fixes each `$N` placeholder's type on the *first* `Parse` of that
+/// cached statement. An optional `integer`/`number` parameter that is
+/// `null` on one call and an actual number on a later call — both
+/// against the *same* cached statement on the *same* connection — must
+/// not corrupt the connection. Before the fix, the first call bound
+/// `NULL` as an untyped/text placeholder (pinning that slot's type), and
+/// the second call's native `i64` bind sent raw binary bytes into a slot
+/// Postgres still expected as text, surfacing as `invalid byte sequence
+/// for encoding "UTF8": 0x00`.
+///
+/// The test pool is pinned to a single connection (see
+/// `TestAppBuilder::with_postgres_datasource`/`tests/common/mod.rs`) so
+/// both calls deterministically land on the same physical connection —
+/// with a multi-connection pool this reproduces only probabilistically,
+/// depending on which connection the pool hands back for the second call.
+#[tokio::test]
+async fn pg_number_after_null_on_same_cached_statement_does_not_corrupt() {
+    let url = require_pg!();
+    let app = app_with_pg(&url).await;
+
+    let (status1, body1) = app
+        .request("POST", "/pg/typechecks/maybe-number", Some("{}"), &[])
+        .await;
+    assert_eq!(status1, 200, "first (null) call failed: {body1}");
+    assert_eq!(body1[0]["isNull"], true);
+
+    let (status2, body2) = app
+        .request(
+            "POST",
+            "/pg/typechecks/maybe-number",
+            Some(r#"{"maybe": 42}"#),
+            &[],
+        )
+        .await;
+    assert_eq!(
+        status2, 200,
+        "second (number) call on the same cached statement must not \
+         corrupt the connection; got {status2}: {body2}"
+    );
+    assert_eq!(body2[0]["isNull"], false);
+    assert_eq!(body2[0]["resolved"], 42);
 }
 
 // ─── Errors ───────────────────────────────────────────────────────────

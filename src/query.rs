@@ -464,17 +464,33 @@ fn bind_pg<'q>(
     match v {
         Value::Null => q.bind(Option::<String>::None),
         Value::Bool(b) => q.bind(b),
-        Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                q.bind(i)
-            } else if let Some(u) = n.as_u64() {
-                q.bind(u as i64)
-            } else if let Some(f) = n.as_f64() {
-                q.bind(f)
-            } else {
-                q.bind(n.to_string())
-            }
-        }
+        // Bind scalar numbers as their string representation rather than
+        // a native i64/f64.
+        //
+        // sqlx caches prepared statements per SQL text on a connection:
+        // the first `Parse` of a given statement fixes each `$N`
+        // placeholder's type, and every later execution against that same
+        // cached statement reuses that fixed type regardless of what Rust
+        // type is bound this time. A parameter that is `NULL` on one call
+        // (bound here as `Option::<String>::None`, an untyped/text-ish
+        // placeholder) and a real number on a later call to the *same*
+        // endpoint would, with a native i64/f64 bind, send raw binary
+        // bytes for a slot Postgres still expects as text -- an integer's
+        // binary representation is full of `0x00` bytes, so the server
+        // rejects it with `invalid byte sequence for encoding "UTF8":
+        // 0x00`, corrupting that request (see
+        // `pg_number_after_null_on_same_cached_statement_does_not_corrupt`
+        // for a reproduction). Binding every number as text keeps the
+        // bound Rust type constant across calls regardless of the JSON
+        // value's shape, which avoids this entirely.
+        //
+        // A column that needs to receive an actual numeric type still
+        // gets one: Postgres applies its usual implicit/assignment casts
+        // from `text` parameters, and an explicit `::INTEGER` / `::BIGINT`
+        // / `::NUMERIC` cast on the SQL side (as already used throughout
+        // this codebase's examples) covers any context where no implicit
+        // cast exists.
+        Value::Number(n) => q.bind(n.to_string()),
         Value::String(s) => q.bind(s),
         Value::Array(items) => bind_pg_array(q, items),
         Value::Object(_) => q.bind(sqlx::types::Json(v)),

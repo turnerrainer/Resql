@@ -6,6 +6,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Binding a JSON number after a JSON `null` on the same cached statement corrupted the connection.** `bind_pg` bound `Value::Null` as an untyped/text-ish `Option<String>::None`, but bound `Value::Number` natively (`i64`/`f64`). sqlx caches prepared statements per SQL text on a connection: the first `Parse` of a statement fixes each `$N` placeholder's type, and later executions against that same cached statement reuse that fixed type regardless of what Rust type is bound. An optional numeric parameter that is `null` on one call and a real number on a later call to the same endpoint -- on the same connection -- would send raw binary `i64`/`f64` bytes into a slot Postgres still expected as text, surfacing as `invalid byte sequence for encoding "UTF8": 0x00` and failing the request with a generic `BadSqlGrammarException`. Fixed by binding all JSON numbers as their string representation, matching how `Value::Null` is already bound, so the Rust type stays constant across calls regardless of the JSON value's shape; SQL that needs an actual numeric type continues to work via Postgres's implicit/assignment casts or an explicit `::INTEGER`/`::BIGINT`/`::NUMERIC` cast, as already used throughout this codebase. Added a regression test (`pg_number_after_null_on_same_cached_statement_does_not_corrupt`) and a companion test documenting the supported explicit-cast INSERT shape (`pg_insert_number_into_integer_column_with_explicit_cast`). The Postgres test pool is now pinned to a single connection so this reproduces deterministically rather than depending on which pooled connection a request happens to get.
+
 ## [0.1.0-alpha.4] - 2026-08-26
 
 ### Added — operator-grade logging (parity with Ruuter-on-Rust)
