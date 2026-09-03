@@ -4,7 +4,7 @@ use sqlx::sqlite::SqliteRow;
 use sqlx::{Column, Row, TypeInfo};
 
 use crate::db::Pool;
-use crate::declaration::{Declaration, ParamType};
+use crate::declaration::{Declaration, DeclaredParam, ItemType, ParamType};
 use crate::error::ResqlError;
 
 /// Convert a Java-style named-parameter SQL (`:name`) into positional
@@ -310,6 +310,27 @@ pub fn validate_params(
                     expected: spec.ty.as_str(),
                     actual,
                 })?;
+            // Strict format check for scalar semantic types (uuid /
+            // date / datetime) — mirrors the per-element check in
+            // `coerce_element`. Wire binding for scalars stays text
+            // (Postgres implicit-casts on assignment), so this
+            // doesn't change any OID; it moves the error surface for
+            // bad literals from a Postgres `BadSqlGrammarException`
+            // to a request-boundary `InvalidParameterType` naming
+            // the offending value. Unified with the array-element
+            // path so the declaration is the strict contract at
+            // every level.
+            validate_semantic_format(spec.ty, name, &coerced)?;
+            // Per-element coercion for arrays with declared `items.type`.
+            // Without this, wrong-typed elements pass validation and get
+            // shoved into a native Postgres array of the *element's* JSON
+            // type — an insert into a `text[]` column with `items: {type:
+            // string}` but numeric elements would silently succeed as an
+            // int8[] wire bind (or worse, fall back to JSONB for empty /
+            // all-null arrays and mismatch a `text[]` column). Reject at
+            // the boundary so the declaration is the single source of truth
+            // for the array's element type (issue #11).
+            let coerced = coerce_array_items(spec, name, coerced)?;
             // A declared-required param present as JSON null is still
             // "missing" per the semantics we advertise (the null is
             // representationally there, but the caller declared it
@@ -338,6 +359,182 @@ pub fn validate_params(
         }
     }
     Ok(out)
+}
+
+/// Boot-time check: every declared `default:` must survive the same
+/// coerce pipeline the runtime path applies to caller-supplied values.
+///
+/// Without this, a misdeclared default (`n: {type: integer, default:
+/// "not-a-number"}` or `xs: {type: array, items: {type: string},
+/// default: [1, 2]}`) sits latent — the endpoint works for every call
+/// that supplies the param and blows up (or worse, silently drops
+/// elements) only when the caller happens to omit it. Fail fast at
+/// load so the shape of the world at boot matches the shape at
+/// request time.
+///
+/// Runs after `declaration::parse`; keeps the existing enum/default
+/// cross-check in `declaration::validate_enum_shapes` separate — that
+/// one runs *inside* parse because it needs no runtime coercion.
+pub fn validate_declaration_defaults(decl: &Declaration) -> Result<(), String> {
+    for (name, spec) in &decl.params {
+        let Some(default) = &spec.default else {
+            continue;
+        };
+        if default.is_null() {
+            continue;
+        }
+        let coerced = coerce_to(spec.ty, default.clone()).map_err(|actual| {
+            format!(
+                "param `{name}`: default {default} does not match declared \
+                 type `{}` (got {actual})",
+                spec.ty.as_str()
+            )
+        })?;
+        // Scalar semantic-format check for the default — same helper
+        // the runtime path applies to caller-supplied scalars, so
+        // `default: "not-a-uuid"` on `type: uuid` fails at load
+        // instead of only when a caller happens to omit the param.
+        validate_semantic_format(spec.ty, name, &coerced).map_err(|e| match e {
+            ResqlError::InvalidParameterType {
+                name: _,
+                expected,
+                actual,
+            } => {
+                format!("param `{name}`: default {default} is not a valid `{expected}` ({actual})")
+            }
+            other => format!("param `{name}`: default {default} is invalid: {other}"),
+        })?;
+        // For arrays with declared items, catch wrong-typed elements
+        // in the default at boot instead of on the first
+        // default-fallback request.
+        coerce_array_items(spec, name, coerced).map_err(|e| match e {
+            ResqlError::InvalidParameterType {
+                name: elem_name,
+                expected,
+                actual,
+            } => format!(
+                "param `{name}`: default {default} has element `{elem_name}` \
+                 of wrong type (expected `{expected}`, got {actual})"
+            ),
+            other => format!("param `{name}`: default {default} is invalid: {other}"),
+        })?;
+    }
+    Ok(())
+}
+
+/// If `spec` is `type: array` with an `items:` block, coerce each
+/// element to the declared element type. Nulls pass (bind as SQL NULL
+/// elements — declaring per-element required is not modeled here).
+/// A non-array value or a spec with no `items` is returned unchanged;
+/// scalar/type-family enforcement is `coerce_to`'s job.
+///
+/// Rejects with `InvalidParameterType` naming the failing element by
+/// index so authors can pinpoint bad payloads. The reason this happens
+/// here rather than in `coerce_to` is that the element type only
+/// exists on `DeclaredParam.items`, not on the scalar `ParamType`.
+fn coerce_array_items(spec: &DeclaredParam, name: &str, value: Value) -> Result<Value, ResqlError> {
+    if spec.ty != ParamType::Array {
+        return Ok(value);
+    }
+    let Some(items_spec) = &spec.items else {
+        return Ok(value);
+    };
+    let Value::Array(elements) = value else {
+        return Ok(value);
+    };
+    let mut coerced = Vec::with_capacity(elements.len());
+    for (idx, elem) in elements.into_iter().enumerate() {
+        coerced.push(coerce_element(items_spec, &format!("{name}[{idx}]"), elem)?);
+    }
+    Ok(Value::Array(coerced))
+}
+
+/// Coerce and validate one array element against a declared
+/// `ItemType`. Recurses into `items_spec.items` for nested arrays so
+/// a mistyped grand-child element bubbles up as `xs[0][1]` instead
+/// of silently being shoved into JSONB (declaring nested items is
+/// the only reason to reach for `items: {type: array, items: ...}`
+/// — Postgres arrays are physically flat, so the wire binding is
+/// JSONB either way, but the validation path is now recursive).
+///
+/// Beyond the family check that `coerce_to` performs, this also
+/// runs strict format validation for the semantic string types
+/// (`uuid`, `date`, `datetime`). Native `uuid[]` / `date[]` /
+/// `timestamptz[]` binding downstream depends on every element
+/// parsing cleanly; catching bad formats here yields an
+/// `InvalidParameterType` at the request boundary with the failing
+/// path, instead of a cryptic `Encode` error at bind time.
+fn coerce_element(items_spec: &ItemType, path: &str, value: Value) -> Result<Value, ResqlError> {
+    let coerced =
+        coerce_to(items_spec.ty, value).map_err(|actual| ResqlError::InvalidParameterType {
+            name: path.to_string(),
+            expected: items_spec.ty.as_str(),
+            actual,
+        })?;
+    validate_semantic_format(items_spec.ty, path, &coerced)?;
+    // Recurse into nested arrays. Only meaningful when the element
+    // type is `array` AND a nested `items` block was declared —
+    // without the inner spec there's nothing to validate against.
+    if items_spec.ty == ParamType::Array {
+        if let Some(nested) = &items_spec.items {
+            if let Value::Array(inner) = coerced {
+                let mut out = Vec::with_capacity(inner.len());
+                for (idx, e) in inner.into_iter().enumerate() {
+                    out.push(coerce_element(nested, &format!("{path}[{idx}]"), e)?);
+                }
+                return Ok(Value::Array(out));
+            }
+        }
+        return Ok(coerced);
+    }
+    Ok(coerced)
+}
+
+/// Strict format check for the semantic string types. Non-string
+/// values (already coerced null, or non-string family) pass through
+/// silently — this only bites when we know we have a string and its
+/// contents must parse as the declared shape.
+fn validate_semantic_format(ty: ParamType, path: &str, v: &Value) -> Result<(), ResqlError> {
+    let Value::String(s) = v else {
+        return Ok(());
+    };
+    let ok = match ty {
+        ParamType::Uuid => uuid::Uuid::parse_str(s).is_ok(),
+        ParamType::Date => chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").is_ok(),
+        ParamType::Datetime => parse_datetime(s).is_some(),
+        _ => return Ok(()),
+    };
+    if ok {
+        Ok(())
+    } else {
+        Err(ResqlError::InvalidParameterType {
+            name: path.to_string(),
+            expected: ty.as_str(),
+            actual: format!("invalid {} literal `{s}`", ty.as_str()),
+        })
+    }
+}
+
+/// Parse a datetime literal into `DateTime<Utc>`. Accepts RFC 3339
+/// with any offset (normalised to UTC) and — as a lenient fallback —
+/// a naive `YYYY-MM-DD HH:MM:SS[.ffffff]` form assumed to be UTC.
+/// The lenient branch matches the "sent from a client that forgot
+/// its TZ" shape the reporter is likely to hit; the assumption is
+/// documented (declaring `datetime` means "UTC-anchored instant" in
+/// this project, matching how `pg_column_value` renders TIMESTAMPTZ).
+fn parse_datetime(s: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
+        return Some(dt.with_timezone(&chrono::Utc));
+    }
+    for fmt in ["%Y-%m-%dT%H:%M:%S%.f", "%Y-%m-%d %H:%M:%S%.f"] {
+        if let Ok(naive) = chrono::NaiveDateTime::parse_from_str(s, fmt) {
+            return Some(chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(
+                naive,
+                chrono::Utc,
+            ));
+        }
+    }
+    None
 }
 
 /// Render a JSON value for use in error messages: strings unquoted,
@@ -481,12 +678,10 @@ where
         // an undeclared `:name` fails at boot, so the runtime never sees
         // one here) — the `String` fallback exists only to satisfy the
         // type-checker; it is unreachable at run time.
-        let declared_ty = declaration
-            .params
-            .get(name)
-            .map(|p| p.ty)
-            .unwrap_or(ParamType::String);
-        q = bind_pg(q, v, declared_ty);
+        let declared = declaration.params.get(name);
+        let declared_ty = declared.map(|p| p.ty).unwrap_or(ParamType::String);
+        let items_ty = declared.and_then(|p| p.items.as_ref()).map(|i| i.ty);
+        q = bind_pg(q, v, declared_ty, items_ty);
     }
     let rows = q.fetch_all(exec).await.map_err(sql_err)?;
     Ok(rows.iter().map(pg_row_to_json).collect())
@@ -530,6 +725,7 @@ fn bind_pg<'q>(
     q: sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments>,
     v: Value,
     declared_ty: ParamType,
+    items_ty: Option<ParamType>,
 ) -> sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments> {
     match declared_ty {
         ParamType::String | ParamType::Date | ParamType::Datetime | ParamType::Uuid => match v {
@@ -555,8 +751,8 @@ fn bind_pg<'q>(
             _ => q.bind(Option::<bool>::None),
         },
         ParamType::Array => match v {
-            Value::Null => q.bind(Option::<sqlx::types::Json<Value>>::None),
-            Value::Array(items) => bind_pg_array(q, items),
+            Value::Null => bind_pg_null_array(q, items_ty),
+            Value::Array(items) => bind_pg_array(q, items, items_ty),
             other => q.bind(sqlx::types::Json(other)),
         },
         ParamType::Object => match v {
@@ -566,71 +762,201 @@ fn bind_pg<'q>(
     }
 }
 
+/// Bind a NULL array. When the declaration names an element type, bind
+/// as the matching native Postgres array so the wire OID stays stable
+/// across null/non-null calls on the same cached statement (same OID-
+/// pinning invariant as `bind_pg` for scalars — issue #9). When no
+/// element type is declared, JSONB is the only safe default because
+/// there's nothing to key the array type off of.
+///
+/// Note the semantic-string branches split from plain `String`:
+/// `date` binds as `date[]`, `datetime` as `timestamptz[]`, `uuid` as
+/// `uuid[]`. These OIDs must match what `bind_pg_array_typed` picks
+/// for the populated path or the cached-statement slot re-Parse
+/// error described in #9 surfaces as an array flavour.
+fn bind_pg_null_array<'q>(
+    q: sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments>,
+    items_ty: Option<ParamType>,
+) -> sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments> {
+    match items_ty {
+        Some(ParamType::Integer) => q.bind(Option::<Vec<Option<i64>>>::None),
+        Some(ParamType::Number) => q.bind(Option::<Vec<Option<f64>>>::None),
+        Some(ParamType::Boolean) => q.bind(Option::<Vec<Option<bool>>>::None),
+        Some(ParamType::String) => q.bind(Option::<Vec<Option<String>>>::None),
+        Some(ParamType::Uuid) => q.bind(Option::<Vec<Option<uuid::Uuid>>>::None),
+        Some(ParamType::Date) => q.bind(Option::<Vec<Option<chrono::NaiveDate>>>::None),
+        Some(ParamType::Datetime) => {
+            q.bind(Option::<Vec<Option<chrono::DateTime<chrono::Utc>>>>::None)
+        }
+        // Nested arrays/objects don't have a native flat-array analogue
+        // in Postgres: JSONB is the honest representation.
+        Some(ParamType::Array | ParamType::Object) | None => {
+            q.bind(Option::<sqlx::types::Json<Value>>::None)
+        }
+    }
+}
+
 /// Homogeneous-scalar arrays bind natively (text[], int8[], float8[],
 /// bool[]) so callers can do `unnest(:xs)` in one round-trip. Anything
-/// else (empty, all-null, mixed, nested) falls back to JSONB.
+/// with no inferrable element type falls back to JSONB.
+///
+/// Precedence: **declared `items.type` wins over the runtime heuristic.**
+/// This is what makes `INSERT INTO t (col) VALUES (:xs)` into a
+/// `text[]` column work with an empty request — `[]` alone gives the
+/// heuristic nothing to key on, but `items: {type: string}` tells us to
+/// bind an empty `text[]` (issue #11). Element-level type conformance
+/// is already enforced by `coerce_array_items` at validation time, so
+/// by the time we're here every non-null element matches `items_ty`.
 ///
 /// Nulls inside an otherwise-homogeneous array stay as SQL NULL elements
 /// (via `Vec<Option<T>>`).
 fn bind_pg_array<'q>(
     q: sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments>,
     items: Vec<Value>,
+    items_ty: Option<ParamType>,
 ) -> sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments> {
+    if let Some(ty) = items_ty {
+        return bind_pg_array_typed(q, items, ty);
+    }
     match detect_pg_array_kind(&items) {
-        Some(PgArrayKind::Int) => {
-            let v: Vec<Option<i64>> = items
-                .iter()
-                .map(|e| match e {
-                    Value::Null => None,
-                    Value::Number(n) => n.as_i64().or_else(|| n.as_u64().map(|u| u as i64)),
-                    _ => None,
-                })
-                .collect();
-            q.bind(v)
-        }
-        Some(PgArrayKind::Float) => {
-            let v: Vec<Option<f64>> = items
-                .iter()
-                .map(|e| match e {
-                    Value::Null => None,
-                    Value::Number(n) => n.as_f64(),
-                    _ => None,
-                })
-                .collect();
-            q.bind(v)
-        }
-        Some(PgArrayKind::Text) => {
-            let v: Vec<Option<String>> = items
-                .iter()
-                .map(|e| match e {
-                    Value::Null => None,
-                    Value::String(s) => Some(s.clone()),
-                    _ => None,
-                })
-                .collect();
-            q.bind(v)
-        }
-        Some(PgArrayKind::Bool) => {
-            let v: Vec<Option<bool>> = items
-                .iter()
-                .map(|e| match e {
-                    Value::Null => None,
-                    Value::Bool(b) => Some(*b),
-                    _ => None,
-                })
-                .collect();
-            q.bind(v)
-        }
+        Some(PgArrayKind::Int) => q.bind(collect_int_array(&items)),
+        Some(PgArrayKind::Float) => q.bind(collect_float_array(&items)),
+        Some(PgArrayKind::Text) => q.bind(collect_text_array(&items)),
+        Some(PgArrayKind::Bool) => q.bind(collect_bool_array(&items)),
         None => {
-            // Empty, all-null, mixed, or nested — bind as JSONB and let
-            // the SQL author use jsonb_array_elements* if they need it.
-            // Emit a debug-level trace so operators can see when the
-            // heuristic couldn't infer a scalar type; not warn because
-            // legitimate JSONB use is common.
-            tracing::debug!("array parameter has no homogeneous scalar type; binding as JSONB");
+            // Empty, all-null, mixed, or nested and no declared items.type
+            // to steer by — bind as JSONB and let the SQL author use
+            // jsonb_array_elements* if they need it. Debug-level trace so
+            // operators can see when the heuristic couldn't infer a scalar
+            // type; not warn because legitimate JSONB use is common.
+            tracing::debug!(
+                "array parameter has no homogeneous scalar type and no declared \
+                 `items.type`; binding as JSONB"
+            );
             q.bind(sqlx::types::Json(Value::Array(items)))
         }
     }
+}
+
+/// Declared-items branch of `bind_pg_array`. Every non-null element is
+/// already the right JSON family (courtesy of `coerce_array_items`), so
+/// the extraction is unwrap-shaped and can't lose data on the shapes
+/// that matter (numeric widening from JSON string still went through
+/// `coerce_to` first). Nested arrays/objects have no flat-array
+/// analogue in Postgres — fall back to JSONB in that shape.
+///
+/// Semantic-string branches (`uuid`, `date`, `datetime`) bind as
+/// their native Postgres array types — `uuid[]` / `date[]` /
+/// `timestamptz[]`. This eliminates the SQL-side `::uuid[]` cast
+/// callers used to need when inserting into a native-typed column
+/// and matches the null-array branch's OID picks for cache
+/// stability. Every element is guaranteed parseable because
+/// `coerce_element` runs `validate_semantic_format` on it before
+/// we ever reach this bind.
+fn bind_pg_array_typed<'q>(
+    q: sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments>,
+    items: Vec<Value>,
+    items_ty: ParamType,
+) -> sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments> {
+    match items_ty {
+        ParamType::Integer => q.bind(collect_int_array(&items)),
+        ParamType::Number => q.bind(collect_float_array(&items)),
+        ParamType::Boolean => q.bind(collect_bool_array(&items)),
+        ParamType::String => q.bind(collect_text_array(&items)),
+        ParamType::Uuid => q.bind(collect_uuid_array(&items)),
+        ParamType::Date => q.bind(collect_date_array(&items)),
+        ParamType::Datetime => q.bind(collect_datetime_array(&items)),
+        ParamType::Array | ParamType::Object => q.bind(sqlx::types::Json(Value::Array(items))),
+    }
+}
+
+fn collect_int_array(items: &[Value]) -> Vec<Option<i64>> {
+    items
+        .iter()
+        .map(|e| match e {
+            Value::Null => None,
+            Value::Number(n) => n.as_i64().or_else(|| n.as_u64().map(|u| u as i64)),
+            _ => None,
+        })
+        .collect()
+}
+
+fn collect_float_array(items: &[Value]) -> Vec<Option<f64>> {
+    items
+        .iter()
+        .map(|e| match e {
+            Value::Null => None,
+            Value::Number(n) => n.as_f64(),
+            _ => None,
+        })
+        .collect()
+}
+
+fn collect_text_array(items: &[Value]) -> Vec<Option<String>> {
+    items
+        .iter()
+        .map(|e| match e {
+            Value::Null => None,
+            Value::String(s) => Some(s.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn collect_bool_array(items: &[Value]) -> Vec<Option<bool>> {
+    items
+        .iter()
+        .map(|e| match e {
+            Value::Null => None,
+            Value::Bool(b) => Some(*b),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Parse UUID elements. `validate_semantic_format` (run at coerce
+/// time by `coerce_element`) has already vetted every non-null
+/// string as a valid UUID, so `.ok()` here is defensively
+/// unreachable — the fallback of `None` for a bad element would be
+/// wrong (SQL NULL vs. the original value the caller sent), which is
+/// why the up-front validation matters.
+fn collect_uuid_array(items: &[Value]) -> Vec<Option<uuid::Uuid>> {
+    items
+        .iter()
+        .map(|e| match e {
+            Value::Null => None,
+            Value::String(s) => uuid::Uuid::parse_str(s).ok(),
+            _ => None,
+        })
+        .collect()
+}
+
+fn collect_date_array(items: &[Value]) -> Vec<Option<chrono::NaiveDate>> {
+    items
+        .iter()
+        .map(|e| match e {
+            Value::Null => None,
+            Value::String(s) => chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").ok(),
+            _ => None,
+        })
+        .collect()
+}
+
+/// UTC-anchored datetime elements. `parse_datetime` accepts RFC 3339
+/// with any offset (normalised to UTC) plus a naive ISO 8601 form
+/// assumed to be UTC — same shape `pg_column_value` renders
+/// TIMESTAMPTZ back as (`...Z`), so a round-trip through Resql
+/// preserves the wall-clock time when the caller sends a Z-suffixed
+/// literal.
+fn collect_datetime_array(items: &[Value]) -> Vec<Option<chrono::DateTime<chrono::Utc>>> {
+    items
+        .iter()
+        .map(|e| match e {
+            Value::Null => None,
+            Value::String(s) => parse_datetime(s),
+            _ => None,
+        })
+        .collect()
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -864,11 +1190,112 @@ fn pg_column_value(row: &PgRow, idx: usize, ty: &str) -> Value {
             );
         }
     }
-    if ty_upper.starts_with("_INT8")
-        || ty_upper == "INT8[]"
-        || ty_upper == "BIGINT[]"
-        || ty_upper.ends_with("[]")
+    if ty_upper.starts_with("_INT8") || ty_upper == "INT8[]" || ty_upper == "BIGINT[]" {
+        if let Ok(Some(v)) = row.try_get::<Option<Vec<i64>>, _>(idx) {
+            return Value::Array(v.into_iter().map(|i| Value::Number(i.into())).collect());
+        }
+    }
+    // Float-family arrays: same width-exactness rule as ints. A
+    // `float8[]` column decoded via `Vec<i64>` fails silently and the
+    // whole column is misreported as JSON `null`, so the specific
+    // FLOAT4/FLOAT8 branches must precede the int8[] catch-all below
+    // (audit follow-up on issue #11 tests).
+    if ty_upper.starts_with("_FLOAT4") || ty_upper == "FLOAT4[]" || ty_upper == "REAL[]" {
+        if let Ok(Some(v)) = row.try_get::<Option<Vec<f32>>, _>(idx) {
+            return Value::Array(
+                v.into_iter()
+                    .map(|f| {
+                        serde_json::Number::from_f64(f as f64)
+                            .map(Value::Number)
+                            .unwrap_or(Value::Null)
+                    })
+                    .collect(),
+            );
+        }
+    }
+    if ty_upper.starts_with("_FLOAT8") || ty_upper == "FLOAT8[]" || ty_upper == "DOUBLE PRECISION[]"
     {
+        if let Ok(Some(v)) = row.try_get::<Option<Vec<f64>>, _>(idx) {
+            return Value::Array(
+                v.into_iter()
+                    .map(|f| {
+                        serde_json::Number::from_f64(f)
+                            .map(Value::Number)
+                            .unwrap_or(Value::Null)
+                    })
+                    .collect(),
+            );
+        }
+    }
+    // Boolean arrays: sqlx decodes `bool[]` as `Vec<bool>`. Same
+    // silent-null failure mode as float arrays before this branch
+    // existed.
+    if ty_upper.starts_with("_BOOL") || ty_upper == "BOOL[]" || ty_upper == "BOOLEAN[]" {
+        if let Ok(Some(v)) = row.try_get::<Option<Vec<bool>>, _>(idx) {
+            return Value::Array(v.into_iter().map(Value::Bool).collect());
+        }
+    }
+    // UUID / DATE / TIMESTAMP / TIMESTAMPTZ / TIME arrays. Each
+    // mirrors the scalar decode above (Uuid::to_string, ISO 8601
+    // dates, `...Z` suffix for TIMESTAMPTZ, `T` separator for naive
+    // TIMESTAMP). Without these branches a `uuid[]` column decoded
+    // as `null` — same silent-loss failure mode as float8[]/bool[]
+    // before their fixes.
+    if ty_upper.starts_with("_UUID") || ty_upper == "UUID[]" {
+        if let Ok(Some(v)) = row.try_get::<Option<Vec<uuid::Uuid>>, _>(idx) {
+            return Value::Array(
+                v.into_iter()
+                    .map(|u| Value::String(u.to_string()))
+                    .collect(),
+            );
+        }
+    }
+    if ty_upper.starts_with("_DATE") || ty_upper == "DATE[]" {
+        if let Ok(Some(v)) = row.try_get::<Option<Vec<chrono::NaiveDate>>, _>(idx) {
+            return Value::Array(
+                v.into_iter()
+                    .map(|d| Value::String(d.to_string()))
+                    .collect(),
+            );
+        }
+    }
+    if ty_upper.starts_with("_TIMESTAMPTZ")
+        || ty_upper == "TIMESTAMPTZ[]"
+        || ty_upper == "TIMESTAMP WITH TIME ZONE[]"
+    {
+        if let Ok(Some(v)) = row.try_get::<Option<Vec<chrono::DateTime<chrono::Utc>>>, _>(idx) {
+            return Value::Array(
+                v.into_iter()
+                    .map(|d| Value::String(d.format("%Y-%m-%dT%H:%M:%S%.fZ").to_string()))
+                    .collect(),
+            );
+        }
+    }
+    if ty_upper.starts_with("_TIMESTAMP") || ty_upper == "TIMESTAMP[]" {
+        if let Ok(Some(v)) = row.try_get::<Option<Vec<chrono::NaiveDateTime>>, _>(idx) {
+            return Value::Array(
+                v.into_iter()
+                    .map(|d| Value::String(d.format("%Y-%m-%dT%H:%M:%S%.f").to_string()))
+                    .collect(),
+            );
+        }
+    }
+    if ty_upper.starts_with("_TIME") || ty_upper == "TIME[]" || ty_upper == "TIMETZ[]" {
+        if let Ok(Some(v)) = row.try_get::<Option<Vec<chrono::NaiveTime>>, _>(idx) {
+            return Value::Array(
+                v.into_iter()
+                    .map(|t| Value::String(t.to_string()))
+                    .collect(),
+            );
+        }
+    }
+    // Last-chance int8[] catch-all: an anonymous array column whose
+    // pgtype name we don't recognise (e.g. `SELECT ARRAY[1,2,3]`
+    // without a target type) — the exact-width rule still applies,
+    // so sqlx will only decode `Vec<i64>` when the array really is
+    // `int8[]`. Everything else falls through to the NULL detection
+    // and last-resort text branches below.
+    if ty_upper.ends_with("[]") {
         if let Ok(Some(v)) = row.try_get::<Option<Vec<i64>>, _>(idx) {
             return Value::Array(v.into_iter().map(|i| Value::Number(i.into())).collect());
         }
@@ -1440,6 +1867,482 @@ mod tests {
         .unwrap();
         let out = validate_params(&decl, Map::new()).unwrap();
         assert!(out["status"].is_null());
+    }
+
+    // ─── Issue #11: declared `items.type` drives element validation
+    // and binding for arrays. Whole-cloth "why should this even pass"
+    // rejection at the boundary, not silent coercion at the seam. ────
+
+    #[test]
+    fn validate_rejects_array_element_of_wrong_type() {
+        // Declared `items.type: string`, elements are numbers →
+        // InvalidParameterType naming the offending element index.
+        let (decl, _) = crate::declaration::parse(
+            "/*\nparams:\n  xs: { type: array, items: { type: string } }\n*/\nSELECT :xs;\n",
+        )
+        .unwrap();
+        let mut incoming = Map::new();
+        incoming.insert("xs".to_string(), json!(["a", 2, "c"]));
+        match validate_params(&decl, incoming).unwrap_err() {
+            ResqlError::InvalidParameterType { name, expected, .. } => {
+                assert_eq!(name, "xs[1]");
+                assert_eq!(expected, "string");
+            }
+            other => panic!("expected InvalidParameterType, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_permits_null_element_in_typed_array() {
+        // SQL NULL element is a legitimate bind — items.type gates the
+        // element's non-null type only, not its nullability.
+        let (decl, _) = crate::declaration::parse(
+            "/*\nparams:\n  xs: { type: array, items: { type: integer } }\n*/\nSELECT :xs;\n",
+        )
+        .unwrap();
+        let mut incoming = Map::new();
+        incoming.insert("xs".to_string(), json!([1, null, 3]));
+        let out = validate_params(&decl, incoming).unwrap();
+        assert_eq!(out["xs"], json!([1, null, 3]));
+    }
+
+    #[test]
+    fn validate_coerces_string_elements_to_declared_integer() {
+        // Element-level coercion piggybacks on `coerce_to`, so string
+        // "2" for items.type: integer becomes numeric 2 — mirrors the
+        // scalar behaviour for GET query strings that funnel numbers as
+        // strings.
+        let (decl, _) = crate::declaration::parse(
+            "/*\nparams:\n  xs: { type: array, items: { type: integer } }\n*/\nSELECT :xs;\n",
+        )
+        .unwrap();
+        let mut incoming = Map::new();
+        incoming.insert("xs".to_string(), json!(["1", "2", "3"]));
+        let out = validate_params(&decl, incoming).unwrap();
+        assert_eq!(out["xs"], json!([1, 2, 3]));
+    }
+
+    #[test]
+    fn validate_accepts_empty_typed_array() {
+        // The reporter's case: declared items type, empty array. Must
+        // survive validation; the bind layer relies on items.type to
+        // pick a native array OID (not JSONB fallback).
+        let (decl, _) = crate::declaration::parse(
+            "/*\nparams:\n  xs: { type: array, items: { type: string } }\n*/\nSELECT :xs;\n",
+        )
+        .unwrap();
+        let mut incoming = Map::new();
+        incoming.insert("xs".to_string(), json!([]));
+        let out = validate_params(&decl, incoming).unwrap();
+        assert_eq!(out["xs"], json!([]));
+    }
+
+    // Corner 5: strict format validation for semantic string element
+    // types. Bad UUID/date/datetime literals rejected at the request
+    // boundary with the failing element path so the native uuid[] /
+    // date[] / timestamptz[] bind downstream can't hit a parse error
+    // it can't recover from cleanly.
+
+    // Scalar semantic-format validation. Mirrors the per-element
+    // check now applied to arrays — same helper, same error surface
+    // (`InvalidParameterType`) — but the wire binding stays text so
+    // no OID changes. Bad literals fail at the request boundary
+    // instead of surfacing as a Postgres `BadSqlGrammarException`.
+
+    #[test]
+    fn validate_rejects_bad_scalar_uuid() {
+        let (decl, _) = crate::declaration::parse(
+            "/*\nparams:\n  id: { type: uuid, required: true }\n*/\nSELECT :id;\n",
+        )
+        .unwrap();
+        let mut incoming = Map::new();
+        incoming.insert("id".to_string(), json!("not-a-uuid"));
+        match validate_params(&decl, incoming).unwrap_err() {
+            ResqlError::InvalidParameterType { name, expected, .. } => {
+                assert_eq!(name, "id");
+                assert_eq!(expected, "uuid");
+            }
+            other => panic!("expected InvalidParameterType, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_accepts_valid_scalar_uuid() {
+        let (decl, _) = crate::declaration::parse(
+            "/*\nparams:\n  id: { type: uuid, required: true }\n*/\nSELECT :id;\n",
+        )
+        .unwrap();
+        let mut incoming = Map::new();
+        incoming.insert(
+            "id".to_string(),
+            json!("11111111-1111-1111-1111-111111111111"),
+        );
+        validate_params(&decl, incoming).unwrap();
+    }
+
+    #[test]
+    fn validate_null_scalar_uuid_bypasses_format_check() {
+        // Optional param + null value must survive — format check
+        // only fires for string values (mirrors the array-element
+        // behaviour where null elements pass).
+        let (decl, _) =
+            crate::declaration::parse("/*\nparams:\n  id: { type: uuid }\n*/\nSELECT :id;\n")
+                .unwrap();
+        let mut incoming = Map::new();
+        incoming.insert("id".to_string(), Value::Null);
+        validate_params(&decl, incoming).unwrap();
+    }
+
+    #[test]
+    fn validate_rejects_bad_scalar_date() {
+        let (decl, _) = crate::declaration::parse(
+            "/*\nparams:\n  d: { type: date, required: true }\n*/\nSELECT :d;\n",
+        )
+        .unwrap();
+        let mut incoming = Map::new();
+        incoming.insert("d".to_string(), json!("2026-13-45"));
+        match validate_params(&decl, incoming).unwrap_err() {
+            ResqlError::InvalidParameterType { name, expected, .. } => {
+                assert_eq!(name, "d");
+                assert_eq!(expected, "date");
+            }
+            other => panic!("expected InvalidParameterType, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_accepts_valid_scalar_date() {
+        let (decl, _) = crate::declaration::parse(
+            "/*\nparams:\n  d: { type: date, required: true }\n*/\nSELECT :d;\n",
+        )
+        .unwrap();
+        let mut incoming = Map::new();
+        incoming.insert("d".to_string(), json!("2026-07-01"));
+        validate_params(&decl, incoming).unwrap();
+    }
+
+    #[test]
+    fn validate_rejects_bad_scalar_datetime() {
+        let (decl, _) = crate::declaration::parse(
+            "/*\nparams:\n  ts: { type: datetime, required: true }\n*/\nSELECT :ts;\n",
+        )
+        .unwrap();
+        let mut incoming = Map::new();
+        incoming.insert("ts".to_string(), json!("not-a-timestamp"));
+        match validate_params(&decl, incoming).unwrap_err() {
+            ResqlError::InvalidParameterType { name, expected, .. } => {
+                assert_eq!(name, "ts");
+                assert_eq!(expected, "datetime");
+            }
+            other => panic!("expected InvalidParameterType, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_accepts_valid_scalar_datetime_rfc3339() {
+        let (decl, _) = crate::declaration::parse(
+            "/*\nparams:\n  ts: { type: datetime, required: true }\n*/\nSELECT :ts;\n",
+        )
+        .unwrap();
+        let mut incoming = Map::new();
+        incoming.insert("ts".to_string(), json!("2026-01-01T10:20:30Z"));
+        validate_params(&decl, incoming).unwrap();
+    }
+
+    #[test]
+    fn boot_rejects_scalar_default_with_bad_uuid_format() {
+        let (decl, _) = crate::declaration::parse(
+            "/*\nparams:\n  id: { type: uuid, default: \"not-a-uuid\" }\n*/\nSELECT :id;\n",
+        )
+        .unwrap();
+        let err = validate_declaration_defaults(&decl).unwrap_err();
+        assert!(err.contains("not a valid `uuid`"), "err = {err}");
+    }
+
+    #[test]
+    fn boot_permits_scalar_default_with_valid_uuid_format() {
+        let (decl, _) = crate::declaration::parse(
+            "/*\nparams:\n  id: { type: uuid, default: \"11111111-1111-1111-1111-111111111111\" }\n*/\nSELECT :id;\n",
+        )
+        .unwrap();
+        validate_declaration_defaults(&decl).unwrap();
+    }
+
+    #[test]
+    fn validate_rejects_bad_uuid_element() {
+        let (decl, _) = crate::declaration::parse(
+            "/*\nparams:\n  ids: { type: array, items: { type: uuid } }\n*/\nSELECT :ids;\n",
+        )
+        .unwrap();
+        let mut incoming = Map::new();
+        incoming.insert(
+            "ids".to_string(),
+            json!(["11111111-1111-1111-1111-111111111111", "not-a-uuid"]),
+        );
+        match validate_params(&decl, incoming).unwrap_err() {
+            ResqlError::InvalidParameterType { name, expected, .. } => {
+                assert_eq!(name, "ids[1]");
+                assert_eq!(expected, "uuid");
+            }
+            other => panic!("expected InvalidParameterType, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_accepts_valid_uuid_elements() {
+        let (decl, _) = crate::declaration::parse(
+            "/*\nparams:\n  ids: { type: array, items: { type: uuid } }\n*/\nSELECT :ids;\n",
+        )
+        .unwrap();
+        let mut incoming = Map::new();
+        incoming.insert(
+            "ids".to_string(),
+            json!([
+                "11111111-1111-1111-1111-111111111111",
+                "22222222-2222-2222-2222-222222222222"
+            ]),
+        );
+        validate_params(&decl, incoming).unwrap();
+    }
+
+    #[test]
+    fn validate_rejects_bad_date_element() {
+        let (decl, _) = crate::declaration::parse(
+            "/*\nparams:\n  ds: { type: array, items: { type: date } }\n*/\nSELECT :ds;\n",
+        )
+        .unwrap();
+        let mut incoming = Map::new();
+        incoming.insert("ds".to_string(), json!(["2026-07-01", "yesterday"]));
+        match validate_params(&decl, incoming).unwrap_err() {
+            ResqlError::InvalidParameterType { name, expected, .. } => {
+                assert_eq!(name, "ds[1]");
+                assert_eq!(expected, "date");
+            }
+            other => panic!("expected InvalidParameterType, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_rejects_bad_datetime_element() {
+        let (decl, _) = crate::declaration::parse(
+            "/*\nparams:\n  ts: { type: array, items: { type: datetime } }\n*/\nSELECT :ts;\n",
+        )
+        .unwrap();
+        let mut incoming = Map::new();
+        incoming.insert(
+            "ts".to_string(),
+            json!(["2026-01-01T10:20:30Z", "not-a-timestamp"]),
+        );
+        match validate_params(&decl, incoming).unwrap_err() {
+            ResqlError::InvalidParameterType { name, expected, .. } => {
+                assert_eq!(name, "ts[1]");
+                assert_eq!(expected, "datetime");
+            }
+            other => panic!("expected InvalidParameterType, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_datetime_accepts_rfc3339_with_z() {
+        assert!(parse_datetime("2026-01-01T10:20:30Z").is_some());
+    }
+
+    #[test]
+    fn parse_datetime_accepts_rfc3339_with_offset() {
+        let dt = parse_datetime("2026-01-01T10:20:30+02:00").unwrap();
+        // Offset must be normalised to UTC (hour 8, not 10).
+        assert_eq!(
+            dt.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+            "2026-01-01T08:20:30Z"
+        );
+    }
+
+    #[test]
+    fn parse_datetime_accepts_naive_space_separator() {
+        // The Postgres text output form; caller might paste it back.
+        assert!(parse_datetime("2026-01-01 10:20:30").is_some());
+    }
+
+    #[test]
+    fn parse_datetime_accepts_naive_t_separator() {
+        assert!(parse_datetime("2026-01-01T10:20:30").is_some());
+    }
+
+    #[test]
+    fn parse_datetime_rejects_garbage() {
+        assert!(parse_datetime("not-a-timestamp").is_none());
+        assert!(parse_datetime("").is_none());
+        assert!(parse_datetime("2026-13-01T10:20:30Z").is_none());
+    }
+
+    // Corner 6: nested items support. Declared
+    // `items: {type: array, items: {type: integer}}` now validates
+    // grand-child elements recursively with `xs[i][j]` paths.
+
+    #[test]
+    fn validate_recurses_into_nested_typed_array() {
+        let (decl, _) = crate::declaration::parse(
+            "/*\nparams:\n  xs: { type: array, items: { type: array, items: { type: integer } } }\n*/\nSELECT :xs;\n",
+        )
+        .unwrap();
+        let mut incoming = Map::new();
+        incoming.insert("xs".to_string(), json!([[1, 2], [3, "four"]]));
+        match validate_params(&decl, incoming).unwrap_err() {
+            ResqlError::InvalidParameterType { name, expected, .. } => {
+                assert_eq!(name, "xs[1][1]");
+                assert_eq!(expected, "integer");
+            }
+            other => panic!("expected InvalidParameterType, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_accepts_nested_typed_array() {
+        let (decl, _) = crate::declaration::parse(
+            "/*\nparams:\n  xs: { type: array, items: { type: array, items: { type: integer } } }\n*/\nSELECT :xs;\n",
+        )
+        .unwrap();
+        let mut incoming = Map::new();
+        incoming.insert("xs".to_string(), json!([[1, 2], [3, 4]]));
+        let out = validate_params(&decl, incoming).unwrap();
+        assert_eq!(out["xs"], json!([[1, 2], [3, 4]]));
+    }
+
+    #[test]
+    fn validate_nested_array_without_inner_items_skips_recursion() {
+        // Outer items.type is array but no nested items → outer level
+        // enforces "each element must be an array", inner elements
+        // are not further validated (declaration didn't ask).
+        let (decl, _) = crate::declaration::parse(
+            "/*\nparams:\n  xs: { type: array, items: { type: array } }\n*/\nSELECT :xs;\n",
+        )
+        .unwrap();
+        let mut incoming = Map::new();
+        incoming.insert("xs".to_string(), json!([[1, "two"], [3, true]]));
+        let out = validate_params(&decl, incoming).unwrap();
+        assert_eq!(out["xs"], json!([[1, "two"], [3, true]]));
+    }
+
+    #[test]
+    fn validate_nested_array_rejects_non_array_element() {
+        // Outer items.type: array — any element that isn't an array
+        // fails family check at the outer level, even without inner
+        // items declared.
+        let (decl, _) = crate::declaration::parse(
+            "/*\nparams:\n  xs: { type: array, items: { type: array } }\n*/\nSELECT :xs;\n",
+        )
+        .unwrap();
+        let mut incoming = Map::new();
+        incoming.insert("xs".to_string(), json!([[1, 2], "not-an-array"]));
+        match validate_params(&decl, incoming).unwrap_err() {
+            ResqlError::InvalidParameterType { name, expected, .. } => {
+                assert_eq!(name, "xs[1]");
+                assert_eq!(expected, "array");
+            }
+            other => panic!("expected InvalidParameterType, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_array_without_items_type_passes_elements_through() {
+        // Back-compat: legacy declaration with no items.type keeps its
+        // "opaque array" behaviour. The runtime bind heuristic still
+        // runs.
+        let (decl, _) =
+            crate::declaration::parse("/*\nparams:\n  xs: { type: array }\n*/\nSELECT :xs;\n")
+                .unwrap();
+        let mut incoming = Map::new();
+        incoming.insert("xs".to_string(), json!([1, "two", true]));
+        let out = validate_params(&decl, incoming).unwrap();
+        assert_eq!(out["xs"], json!([1, "two", true]));
+    }
+
+    // ─── Corner 1: defaults go through the same coerce pipeline at
+    // boot so a misdeclared default can't sit latent until the caller
+    // happens to omit the param. ──────────────────────────────────
+
+    #[test]
+    fn boot_rejects_scalar_default_of_wrong_family() {
+        // integer param with a string default that isn't a number →
+        // reject at boot, not at first default-fallback request.
+        let (decl, _) = crate::declaration::parse(
+            "/*\nparams:\n  n: { type: integer, default: \"not-a-number\" }\n*/\nSELECT :n;\n",
+        )
+        .unwrap();
+        let err = validate_declaration_defaults(&decl).unwrap_err();
+        assert!(err.contains("default"), "err = {err}");
+        assert!(err.contains("`integer`"), "err = {err}");
+    }
+
+    #[test]
+    fn boot_permits_scalar_default_that_coerces() {
+        // string-encoded integer default is fine — same coerce rule
+        // as the runtime path (mirrors GET query-string arrival).
+        let (decl, _) = crate::declaration::parse(
+            "/*\nparams:\n  n: { type: integer, default: \"42\" }\n*/\nSELECT :n;\n",
+        )
+        .unwrap();
+        validate_declaration_defaults(&decl).unwrap();
+    }
+
+    #[test]
+    fn boot_rejects_array_default_with_wrong_element_type() {
+        // items.type: string but default has an integer element →
+        // otherwise silently becomes SQL NULL in a text[] bind.
+        let (decl, _) = crate::declaration::parse(
+            "/*\nparams:\n  xs: { type: array, items: { type: string }, default: [\"a\", 2] }\n*/\nSELECT :xs;\n",
+        )
+        .unwrap();
+        let err = validate_declaration_defaults(&decl).unwrap_err();
+        assert!(err.contains("xs[1]"), "err = {err}");
+        assert!(err.contains("`string`"), "err = {err}");
+    }
+
+    #[test]
+    fn boot_permits_array_default_matching_items() {
+        let (decl, _) = crate::declaration::parse(
+            "/*\nparams:\n  xs: { type: array, items: { type: string }, default: [\"a\", \"b\"] }\n*/\nSELECT :xs;\n",
+        )
+        .unwrap();
+        validate_declaration_defaults(&decl).unwrap();
+    }
+
+    #[test]
+    fn boot_permits_empty_array_default() {
+        // The reporter's `default: []` shape (implicit "no categories")
+        // must load; validation only cares about element types.
+        let (decl, _) = crate::declaration::parse(
+            "/*\nparams:\n  xs: { type: array, items: { type: string }, default: [] }\n*/\nSELECT :xs;\n",
+        )
+        .unwrap();
+        validate_declaration_defaults(&decl).unwrap();
+    }
+
+    #[test]
+    fn boot_rejects_default_with_bad_semantic_element_format() {
+        // `default: ["not-a-uuid"]` on `items: {type: uuid}` — the
+        // per-element format check runs inside the boot validator
+        // via `coerce_array_items` → `coerce_element` →
+        // `validate_semantic_format`. Bad literals surface at load
+        // rather than blowing up the first default-fallback request.
+        let (decl, _) = crate::declaration::parse(
+            "/*\nparams:\n  ids: { type: array, items: { type: uuid }, default: [\"not-a-uuid\"] }\n*/\nSELECT :ids;\n",
+        )
+        .unwrap();
+        let err = validate_declaration_defaults(&decl).unwrap_err();
+        assert!(err.contains("ids[0]"), "err = {err}");
+        assert!(err.contains("uuid"), "err = {err}");
+    }
+
+    #[test]
+    fn boot_permits_null_default() {
+        // Explicit `default: null` bypasses coercion — matches the
+        // runtime enum bypass rule and the "null everywhere" opt-out.
+        let (decl, _) = crate::declaration::parse(
+            "/*\nparams:\n  xs: { type: array, items: { type: string }, default: null }\n*/\nSELECT :xs;\n",
+        )
+        .unwrap();
+        validate_declaration_defaults(&decl).unwrap();
     }
 
     #[test]

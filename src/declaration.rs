@@ -79,6 +79,17 @@ pub struct ItemType {
     pub ty: ParamType,
     #[serde(default)]
     pub format: Option<String>,
+    /// Nested element type for arrays-of-arrays. Postgres arrays are
+    /// physically flat (they're multi-dimensional but homogeneously
+    /// typed), so any nested-array param binds as JSONB regardless;
+    /// declaring this here doesn't change the wire shape, it turns on
+    /// **recursive per-element validation** so a mistyped grand-child
+    /// element (`[[1, "two"]]` where `items: {type: array, items:
+    /// {type: integer}}` was declared) fails at the request boundary
+    /// with a path like `xs[0][1]` instead of silently being shoved
+    /// into JSONB.
+    #[serde(default)]
+    pub items: Option<Box<ItemType>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize)]
@@ -164,8 +175,26 @@ pub fn parse(sql: &str) -> Result<(Declaration, String), String> {
     let (yaml_text, remaining) = extract_block(sql)?;
     let decl: Declaration = serde_yaml_ng::from_str(&yaml_text)
         .map_err(|e| format!("declaration YAML is invalid: {e}"))?;
+    validate_items_placement(&decl)?;
     validate_enum_shapes(&decl)?;
     Ok((decl, remaining))
+}
+
+/// `items:` is meaningful only on `type: array`. Declaring it on a
+/// scalar type is nonsense — silently ignored at runtime, which
+/// swallows the author's intent. Fail-fast so a typo like
+/// `type: string, items: {type: integer}` surfaces at boot.
+fn validate_items_placement(decl: &Declaration) -> Result<(), String> {
+    for (name, spec) in &decl.params {
+        if spec.items.is_some() && spec.ty != ParamType::Array {
+            return Err(format!(
+                "param `{name}`: `items` is only valid on `type: array` \
+                 (declared type is `{}`)",
+                spec.ty.as_str()
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Boot-time sanity check on any `enum:` declared for a param:
@@ -397,6 +426,26 @@ SELECT id, email FROM users WHERE login = :login;
         // JSON Schema semantics: null bypasses enum. A nullable optional
         // with a declared enum + `default: null` must load.
         let src = "/*\nparams:\n  status: { type: string, default: null, enum: [active, disabled] }\n*/\nSELECT :status;\n";
+        parse(src).unwrap();
+    }
+
+    #[test]
+    fn rejects_items_on_scalar_type() {
+        // `items: {...}` next to `type: string` is a typo, not a
+        // valid shape. Silent-ignore would swallow the author's
+        // intent — fail at boot instead.
+        let src = "/*\nparams:\n  x: { type: string, items: { type: integer } }\n*/\nSELECT :x;\n";
+        let err = parse(src).unwrap_err();
+        assert!(
+            err.contains("`items` is only valid on `type: array`"),
+            "err = {err}"
+        );
+    }
+
+    #[test]
+    fn accepts_items_on_array_type() {
+        // Sanity: the reverse case (correct placement) still loads.
+        let src = "/*\nparams:\n  xs: { type: array, items: { type: integer } }\n*/\nSELECT :xs;\n";
         parse(src).unwrap();
     }
 
