@@ -62,35 +62,80 @@ convention and matches Ruuter's declaration format.
 
 ## Parameter types
 
-| Type       | Accepts (JSON)                         | Bound as                        |
-|------------|----------------------------------------|---------------------------------|
-| `string`   | string                                 | text                            |
-| `integer`  | integer, string that parses as i64     | BIGINT                          |
-| `number`   | number, string that parses as f64      | DOUBLE PRECISION                |
-| `boolean`  | bool, `"true"`/`"false"`/`"1"`/`"0"`   | BOOLEAN                         |
-| `array`    | array, JSON-encoded array string       | native scalar array or JSONB    |
-| `object`   | object, JSON-encoded object string     | JSONB (Postgres) / TEXT (SQLite)|
-| `date`     | string (YYYY-MM-DD)                    | text (cast in SQL as needed)    |
-| `datetime` | string (RFC 3339)                      | text (cast in SQL as needed)    |
-| `uuid`     | string (UUID form)                     | UUID / text                     |
+| Type       | Accepts (JSON)                                   | Bound as                                       |
+|------------|--------------------------------------------------|------------------------------------------------|
+| `string`   | string                                           | text                                           |
+| `integer`  | integer, string that parses as i64               | BIGINT                                         |
+| `number`   | number, string that parses as f64                | DOUBLE PRECISION                               |
+| `boolean`  | bool, `"true"`/`"false"`/`"1"`/`"0"`             | BOOLEAN                                        |
+| `array`    | array, JSON-encoded array string                 | native array by declared `items.type`, or JSONB|
+| `object`   | object, JSON-encoded object string               | JSONB (Postgres) / TEXT (SQLite)               |
+| `date`     | strict `YYYY-MM-DD`                              | text (Postgres implicit-casts on assignment)   |
+| `datetime` | RFC 3339 (any offset → UTC) or naive ISO 8601    | text (Postgres implicit-casts on assignment)   |
+| `uuid`     | any form `uuid::Uuid::parse_str` accepts         | text (Postgres implicit-casts on assignment)   |
+
+Bad `date` / `datetime` / `uuid` literals are rejected at the request
+boundary as `400 InvalidParameterTypeException` — you don't get a
+cryptic Postgres cast error on the far side of the bind. Same rule
+applies to each element of an array declared with `items: {type:
+date|datetime|uuid}`.
 
 Per-param attributes:
 
 - `required: true|false` (default `false`).
 - `default: <value>` — used when the caller omits an optional param.
-  Absent + no `default` → SQL NULL.
+  Absent + no `default` → SQL NULL. Defaults run through the same
+  coerce pipeline caller values do at **boot** (not first-use), so a
+  misdeclared default — `default: "not-a-number"` on `type: integer`,
+  `default: ["not-a-uuid"]` on `items: {type: uuid}` — fails at load
+  with a clear error rather than sitting latent until a request happens
+  to trigger the fallback.
 - `format: <string>` — OpenAPI format hint, no runtime effect.
 - `description: <string>` — flows into the OpenAPI param description.
-- `items:` — for `type: array`, documents the element schema:
+- `items:` — for `type: array`, describes the element schema. Only
+  valid on `type: array`; declaring `items:` on any scalar type fails
+  at boot. When present, every array element is validated against
+  `items.type` at the request boundary: wrong-typed elements return
+  400 naming the failing path (e.g. `xs[1]: expected string, got
+  number`). Semantic element types (`uuid`, `date`, `datetime`) also
+  get the same strict format check the scalar path applies.
+
   ```yaml
   items:
     type: string
   ```
+
+  For arrays of arrays, `items:` can nest — validation recurses to
+  arbitrary depth and reports the full path:
+
+  ```yaml
+  # Rejects [[1, "two"]] as `xs[0][1]: expected integer, got string`.
+  xs:
+    type: array
+    items:
+      type: array
+      items:
+        type: integer
+  ```
+
+  Native Postgres binding by declared element type: `int8[]`,
+  `float8[]`, `text[]`, `bool[]`, `uuid[]`, `date[]`, `timestamptz[]`.
+  Empty and all-null arrays still bind as the correct native array
+  (not JSONB), so `INSERT INTO t (col) VALUES (:xs)` into a native
+  `text[]` column works with `{"xs": []}` when `items: {type: string}`
+  is declared. Nested arrays and arrays of objects bind as JSONB
+  (Postgres arrays are physically flat — no native "array of array"
+  type). Legacy declarations with no `items:` block keep the old
+  runtime-heuristic behaviour.
 - `enum: [<values...>]` — closed set of permitted values (JSON Schema
   `enum` keyword). Rejected at the request boundary before any SQL
   binding, so the database never sees a value outside the set. Every
-  entry must match the declared `type`; if a `default:` is also set it
-  must be in the enum (or `null`). Empty lists are rejected at boot.
+  entry must match the declared `type` — for semantic types (`uuid`,
+  `date`, `datetime`) each entry is also format-validated at boot, so
+  a `type: uuid, enum: ["not-a-uuid"]` declaration fails at load
+  instead of shipping a dead entry no request could ever match. If a
+  `default:` is also set it must be in the enum (or `null`). Empty
+  lists are rejected at boot.
 
   ```yaml
   params:
@@ -214,9 +259,11 @@ SELECT region, revenue
  WHERE day = cast(:day AS DATE);
 ```
 
-Request: `{"day": "2026-08-26"}`. `date` binds as text; use an
-explicit `cast(:day AS DATE)` in Postgres so the planner picks a
-date-typed index.
+Request: `{"day": "2026-08-26"}`. Strict `YYYY-MM-DD` — anything else
+(`"08/26/2026"`, `"August 26"`, `"2026-13-01"`) is rejected at the
+request boundary as `400 InvalidParameterTypeException`. `date` binds
+as text; use an explicit `cast(:day AS DATE)` in Postgres so the
+planner picks a date-typed index.
 
 ### `datetime`
 
@@ -239,8 +286,13 @@ VALUES (:actor, :action, cast(:occurredAt AS TIMESTAMPTZ));
 ```
 
 Request: `{"actor":"alice","action":"login","occurredAt":"2026-08-26T14:30:00Z"}`.
-Emit-side: Postgres `TIMESTAMPTZ` columns render as
-`2026-08-26T14:30:00Z` and `TIMESTAMP` as `2026-08-26T14:30:00`.
+Accepts RFC 3339 with any offset (normalised to UTC — a `+02:00`
+literal is stored as UTC-2h) plus a naive ISO 8601 form (`T` or space
+separator) treated as UTC. Anything else — `"yesterday"`,
+`"2026-08-26 14:30 EST"`, `"August 26"` — is rejected at the request
+boundary as `400 InvalidParameterTypeException`. Emit-side: Postgres
+`TIMESTAMPTZ` columns render as `2026-08-26T14:30:00Z` and `TIMESTAMP`
+as `2026-08-26T14:30:00`.
 
 ### `uuid`
 
@@ -265,7 +317,10 @@ SELECT user_id, expires_at
 ```
 
 Request: `{"sessionId": "d3f9b1a2-4c8e-4bde-9a2f-01a2b3c4d5e6"}`.
-Malformed UUIDs fail at the DB with a 400 (Postgres rejects the cast).
+Malformed UUIDs are rejected at the request boundary as `400
+InvalidParameterTypeException` — the boundary check catches them
+before the SQL is ever bound. Any form `uuid::Uuid::parse_str`
+accepts is valid (hyphenated / unhyphenated / braced hex).
 
 ### `array`
 
@@ -289,10 +344,15 @@ returns:
 SELECT id, login FROM users WHERE login = ANY(:logins);
 ```
 
-Request: `{"logins": ["alice", "bob", "charlie"]}`. Homogeneous scalar
-arrays bind as native Postgres arrays (`text[]`, `int8[]`, `float8[]`,
-`bool[]`); mixed / nested / all-null / empty fall back to JSONB — see
-[Writing SQL endpoints](./sql-files.md#native-array-parameters-postgres).
+Request: `{"logins": ["alice", "bob", "charlie"]}`. When `items:` is
+declared, the array binds as the matching native Postgres array —
+`text[]`, `int8[]`, `float8[]`, `bool[]`, `uuid[]`, `date[]`, or
+`timestamptz[]` — even for empty and all-null arrays. Non-string
+elements would return 400 naming the failing element (`logins[2]:
+expected string, got number`) before any SQL runs. Legacy
+declarations without `items:` fall back to a runtime scalar-type
+heuristic, and mixed / nested arrays without a declared inner type
+land in JSONB — see [Writing SQL endpoints](./sql-files.md#native-array-parameters-postgres).
 SQLite: `... FROM json_each(:logins)`.
 
 ### `object`
@@ -413,14 +473,24 @@ For every request Resql:
 2. **Rejects wrong types** — a value that doesn't fit the declared
    type produces 400 `InvalidParameterTypeException` naming the param
    and expected type.
-3. **Rejects values outside declared `enum:`** — a value not in the
+3. **Rejects bad `uuid` / `date` / `datetime` literals** — a value
+   whose family matches (it's a string) but whose format doesn't
+   parse cleanly produces 400 `InvalidParameterTypeException` naming
+   the param and the accepted format. Applies to both scalar values
+   and every element of an array with a matching declared
+   `items.type`.
+4. **Rejects wrong-typed array elements** — for `items:`-declared
+   arrays, each element goes through the same coerce + format rules
+   as a scalar. Failure returns 400 naming the failing path
+   (`xs[i]` for flat arrays, `xs[i][j]` for nested).
+5. **Rejects values outside declared `enum:`** — a value not in the
    closed set produces 400 `InvalidParameterValueException` naming
    the param, the offending value, and the allowed set. Null bypasses
    this check (nullability is governed by `required:` / `default:`).
-4. **Rejects missing required** — same as before: 400
+6. **Rejects missing required** — same as before: 400
    `InvalidDataAccessApiUsageException`. A required param whose value
    is JSON `null` also counts as missing.
-5. **Fills missing optionals with default (or NULL)** — the bind
+7. **Fills missing optionals with default (or NULL)** — the bind
    layer always sees an entry for every declared param, so
    `IS NULL OR col = :x` filters work naturally.
 

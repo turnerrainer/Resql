@@ -181,3 +181,19 @@ databaseChangeLog:
                 dates DATE[] NOT NULL DEFAULT '{}',
                 timestamps TIMESTAMPTZ[] NOT NULL DEFAULT '{}'
               );
+
+  - changeSet:
+      id: 009-decimal-jsonb-array-columns
+      author: rainer
+      changes:
+        - sql:
+            splitStatements: false
+            sql: |
+              CREATE TABLE decimal_arrays (
+                id BIGSERIAL PRIMARY KEY,
+                amounts NUMERIC(12,2)[] NOT NULL DEFAULT '{}'
+              );
+              CREATE TABLE jsonb_arrays (
+                id BIGSERIAL PRIMARY KEY,
+                docs JSONB[] NOT NULL DEFAULT '{}'
+              );

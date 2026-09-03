@@ -235,6 +235,12 @@ fn walk_method_dir(
         // happens to omit the param at request time.
         crate::query::validate_declaration_defaults(&declaration)
             .map_err(|reason| declaration::invalid(entry.clone(), reason))?;
+        // Enum entries get the same semantic-format check as caller
+        // values so a `type: uuid, enum: [..., "not-a-uuid"]`
+        // declaration can't ship a dead entry that no valid request
+        // could ever match.
+        crate::query::validate_declaration_enum_formats(&declaration)
+            .map_err(|reason| declaration::invalid(entry.clone(), reason))?;
         let transactional = parse_transactional_marker(&sql);
         index.insert(SavedQuery {
             project: project.to_string(),

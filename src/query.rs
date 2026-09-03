@@ -422,6 +422,48 @@ pub fn validate_declaration_defaults(decl: &Declaration) -> Result<(), String> {
     Ok(())
 }
 
+/// Boot-time semantic-format check for every entry in an `enum:` list.
+///
+/// `declaration::validate_enum_shapes` already asserts the type
+/// *family* of each enum entry matches the declared `ParamType`
+/// (e.g. reject `type: uuid, enum: [42]` because 42 isn't a string
+/// at all). That's a String-vs-Number check; it can't tell an
+/// invalid UUID literal from a valid one because both are strings.
+///
+/// This pass closes that hole: `type: uuid, enum: ["11111...",
+/// "not-a-uuid"]` would previously load fine (both are strings) but
+/// `"not-a-uuid"` is a dead entry — no valid request could ever
+/// match it, because the runtime `validate_semantic_format` check
+/// on the incoming value would reject it before the enum lookup.
+/// Fail at boot instead so the declaration author sees the mistake
+/// on first load rather than never (dead enum entry never surfaces
+/// as a request-side error).
+///
+/// Lives here rather than in `declaration.rs` because it depends on
+/// `validate_semantic_format` (which imports `uuid` and `chrono`);
+/// keeping declaration.rs pure means those crates don't leak into
+/// the boot-parse module.
+pub fn validate_declaration_enum_formats(decl: &Declaration) -> Result<(), String> {
+    for (name, spec) in &decl.params {
+        let Some(values) = &spec.allowed else {
+            continue;
+        };
+        for (idx, v) in values.iter().enumerate() {
+            validate_semantic_format(spec.ty, name, v).map_err(|e| match e {
+                ResqlError::InvalidParameterType {
+                    name: _,
+                    expected,
+                    actual,
+                } => format!(
+                    "param `{name}`: enum entry [{idx}] {v} is not a valid `{expected}` ({actual})"
+                ),
+                other => format!("param `{name}`: enum entry [{idx}] {v} is invalid: {other}"),
+            })?;
+        }
+    }
+    Ok(())
+}
+
 /// If `spec` is `type: array` with an `items:` block, coerce each
 /// element to the declared element type. Nulls pass (bind as SQL NULL
 /// elements — declaring per-element required is not modeled here).
@@ -1289,6 +1331,31 @@ fn pg_column_value(row: &PgRow, idx: usize, ty: &str) -> Value {
             );
         }
     }
+    // NUMERIC / DECIMAL arrays: stringify each element to preserve
+    // precision — same rationale as the scalar `NUMERIC` branch above
+    // (f64 would silently truncate). Without this branch a
+    // `numeric[]` column falls through to the int8[] catch-all which
+    // fails to decode and the whole column comes back as JSON null.
+    if ty_upper.starts_with("_NUMERIC") || ty_upper == "NUMERIC[]" || ty_upper == "DECIMAL[]" {
+        if let Ok(Some(v)) = row.try_get::<Option<Vec<sqlx::types::Decimal>>, _>(idx) {
+            return Value::Array(v.into_iter().map(|d| Value::String(d.to_string())).collect());
+        }
+    }
+    // JSON / JSONB arrays: unwrap each element's `sqlx::types::Json`
+    // wrapper so the response holds the actual JSON value at each
+    // slot, not a stringified copy. Mirrors the scalar `JSON` /
+    // `JSONB` branch above. `_JSONB` first — `starts_with("_JSON")`
+    // would also match `_JSONB`, so the more-specific check wins.
+    if ty_upper.starts_with("_JSONB") || ty_upper == "JSONB[]" {
+        if let Ok(Some(v)) = row.try_get::<Option<Vec<sqlx::types::Json<Value>>>, _>(idx) {
+            return Value::Array(v.into_iter().map(|j| j.0).collect());
+        }
+    }
+    if ty_upper.starts_with("_JSON") || ty_upper == "JSON[]" {
+        if let Ok(Some(v)) = row.try_get::<Option<Vec<sqlx::types::Json<Value>>>, _>(idx) {
+            return Value::Array(v.into_iter().map(|j| j.0).collect());
+        }
+    }
     // Last-chance int8[] catch-all: an anonymous array column whose
     // pgtype name we don't recognise (e.g. `SELECT ARRAY[1,2,3]`
     // without a target type) — the exact-width rule still applies,
@@ -2057,6 +2124,54 @@ mod tests {
         .unwrap();
         let err = validate_declaration_defaults(&decl).unwrap_err();
         assert!(err.contains("not a valid `uuid`"), "err = {err}");
+    }
+
+    #[test]
+    fn boot_rejects_enum_entry_with_bad_semantic_format() {
+        // The type-family check inside `validate_enum_shapes`
+        // (declaration.rs) passes any String against `type: uuid` —
+        // it can't tell "not-a-uuid" from a real UUID because both
+        // are strings. This boot check closes that gap.
+        let (decl, _) = crate::declaration::parse(
+            "/*\nparams:\n  id: { type: uuid, required: true, enum: [\"11111111-1111-1111-1111-111111111111\", \"not-a-uuid\"] }\n*/\nSELECT :id;\n",
+        )
+        .unwrap();
+        let err = validate_declaration_enum_formats(&decl).unwrap_err();
+        assert!(err.contains("enum entry [1]"), "err = {err}");
+        assert!(err.contains("`uuid`"), "err = {err}");
+    }
+
+    #[test]
+    fn boot_permits_enum_with_all_valid_semantic_entries() {
+        let (decl, _) = crate::declaration::parse(
+            "/*\nparams:\n  id: { type: uuid, required: true, enum: [\"11111111-1111-1111-1111-111111111111\", \"22222222-2222-2222-2222-222222222222\"] }\n*/\nSELECT :id;\n",
+        )
+        .unwrap();
+        validate_declaration_enum_formats(&decl).unwrap();
+    }
+
+    #[test]
+    fn boot_rejects_date_enum_entry_with_bad_format() {
+        let (decl, _) = crate::declaration::parse(
+            "/*\nparams:\n  d: { type: date, required: true, enum: [\"2026-07-01\", \"July 1\"] }\n*/\nSELECT :d;\n",
+        )
+        .unwrap();
+        let err = validate_declaration_enum_formats(&decl).unwrap_err();
+        assert!(err.contains("enum entry [1]"), "err = {err}");
+        assert!(err.contains("`date`"), "err = {err}");
+    }
+
+    #[test]
+    fn boot_enum_check_skips_null_entries_and_non_semantic_types() {
+        // `validate_semantic_format` no-ops for non-string values
+        // and non-semantic types — the enum boot check inherits
+        // that behaviour, so `type: string, enum: [...]` and any
+        // integer/boolean enums keep loading.
+        let (decl, _) = crate::declaration::parse(
+            "/*\nparams:\n  s: { type: string, enum: [\"a\", \"b\"] }\n*/\nSELECT :s;\n",
+        )
+        .unwrap();
+        validate_declaration_enum_formats(&decl).unwrap();
     }
 
     #[test]

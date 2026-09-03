@@ -1641,6 +1641,107 @@ async fn pg_number_param_shape_mix_survives_repeated_alternation() {
     }
 }
 
+// ─── Decode-completeness: `numeric[]` and `jsonb[]` columns. Same
+// silent-null-decode failure mode as `float8[]`/`bool[]` had before
+// their branches landed — every array flavour without an explicit
+// decode branch fell through to the int8[] catch-all, failed, and
+// the column came back as JSON null. ──────────────────────────────
+
+async fn app_with_decode_arrays(url: &str) -> common::TestApp {
+    TestAppBuilder::new()
+        .no_sqlite_datasources()
+        .with_postgres_datasource("pg", url)
+        .with_sql(
+            "pg/POST/decode/numeric-array.sql",
+            "INSERT INTO decimal_arrays (amounts) VALUES (:amounts::NUMERIC(12,2)[]) \
+             RETURNING id, amounts",
+        )
+        .with_sql(
+            "pg/POST/decode/jsonb-array.sql",
+            "INSERT INTO jsonb_arrays (docs) VALUES (:docs::JSONB[]) \
+             RETURNING id, docs",
+        )
+        .with_sql(
+            "pg/GET/decode/numeric-array-literal.sql",
+            "SELECT ARRAY[12345.67, 9876.54]::NUMERIC(12,2)[] AS amounts",
+        )
+        .with_sql(
+            "pg/GET/decode/jsonb-array-literal.sql",
+            "SELECT ARRAY['{\"k\":1}'::JSONB, '{\"k\":2}'::JSONB]::JSONB[] AS docs",
+        )
+        .build()
+        .await
+}
+
+/// `numeric[]` decodes as JSON strings — same precision-preserving
+/// treatment as scalar NUMERIC (f64 would silently truncate).
+#[tokio::test]
+async fn pg_numeric_array_column_decodes_as_strings() {
+    let url = require_pg!();
+    let app = app_with_decode_arrays(&url).await;
+    let (status, body) = app
+        .request("GET", "/pg/decode/numeric-array-literal", None, &[])
+        .await;
+    assert_eq!(status, 200);
+    let arr = body[0]["amounts"].as_array().unwrap();
+    assert_eq!(arr.len(), 2);
+    // Precision preserved — string form, not f64-rounded.
+    assert_eq!(arr[0], "12345.67");
+    assert_eq!(arr[1], "9876.54");
+}
+
+/// `jsonb[]` decodes each element as its native JSON value, not
+/// stringified. Mirrors the scalar `JSONB` decode.
+#[tokio::test]
+async fn pg_jsonb_array_column_decodes_as_json_values() {
+    let url = require_pg!();
+    let app = app_with_decode_arrays(&url).await;
+    let (status, body) = app
+        .request("GET", "/pg/decode/jsonb-array-literal", None, &[])
+        .await;
+    assert_eq!(status, 200);
+    let arr = body[0]["docs"].as_array().unwrap();
+    assert_eq!(arr.len(), 2);
+    assert_eq!(arr[0], json!({"k": 1}));
+    assert_eq!(arr[1], json!({"k": 2}));
+}
+
+/// End-to-end via a real `NUMERIC(12,2)[]` column — proves the
+/// decode works against a column with a target precision, not just
+/// an anonymous SELECT.
+#[tokio::test]
+async fn pg_numeric_array_round_trips_through_native_column() {
+    let url = require_pg!();
+    let app = app_with_decode_arrays(&url).await;
+    let (status, body) = app
+        .request(
+            "POST",
+            "/pg/decode/numeric-array",
+            Some(r#"{"amounts": "{100.25, 200.75}"}"#),
+            &[],
+        )
+        .await;
+    assert_eq!(status, 200, "numeric[] insert failed: {body}");
+    assert_eq!(body[0]["amounts"], json!(["100.25", "200.75"]));
+}
+
+/// End-to-end via a real `JSONB[]` column.
+#[tokio::test]
+async fn pg_jsonb_array_round_trips_through_native_column() {
+    let url = require_pg!();
+    let app = app_with_decode_arrays(&url).await;
+    let (status, body) = app
+        .request(
+            "POST",
+            "/pg/decode/jsonb-array",
+            Some(r#"{"docs": "{\"{\\\"a\\\": 1}\", \"{\\\"b\\\": 2}\"}"}"#),
+            &[],
+        )
+        .await;
+    assert_eq!(status, 200, "jsonb[] insert failed: {body}");
+    assert_eq!(body[0]["docs"], json!([{"a": 1}, {"b": 2}]));
+}
+
 // ─── Task 003 on Postgres: @transactional single-shot rollback ───────
 
 async fn app_with_tx_marker(url: &str) -> common::TestApp {
