@@ -152,7 +152,8 @@ Spring Boot service. Interface-compatible with the original for the SQL-file-to-
 - Container image signed with cosign keyless via GHA OIDC.
 - Trivy HIGH/CRITICAL scan gates image signing.
 
-[Unreleased]: https://github.com/turnerrainer/Resql/compare/v0.1.1-alpha...HEAD
+[Unreleased]: https://github.com/turnerrainer/Resql/compare/v0.1.2-alpha...HEAD
+[0.1.2-alpha]: https://github.com/turnerrainer/Resql/releases/tag/v0.1.2-alpha
 [0.1.1-alpha]: https://github.com/turnerrainer/Resql/releases/tag/v0.1.1-alpha
 [0.1.0-alpha.4]: https://github.com/turnerrainer/Resql/releases/tag/v0.1.0-alpha.4
 [0.1.0-alpha.3]: https://github.com/turnerrainer/Resql/releases/tag/v0.1.0-alpha.3
