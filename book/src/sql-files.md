@@ -192,10 +192,11 @@ loads should split into multiple batches at the caller.
 
 ## Native array parameters (Postgres)
 
-When a JSON parameter is an array of homogeneous scalars, it binds
-natively as a Postgres array (`text[]`, `int8[]`, `float8[]`, `bool[]`)
-so a single SQL statement using `unnest()` can process the whole batch
-in one round-trip:
+Declaring `items.type` on an array parameter binds the array as its
+matching native Postgres type — `text[]`, `int8[]`, `float8[]`,
+`bool[]`, `uuid[]`, `date[]`, or `timestamptz[]` — even for empty
+and all-null payloads. A single SQL statement using `unnest()` can
+then process the whole batch in one round-trip:
 
 ```sql
 -- sql/audit/POST/append-many.sql
@@ -230,12 +231,25 @@ curl -X POST http://localhost:8080/audit/append-many \
 
 Rules:
 
-- Non-null elements must all be the same scalar kind. Nulls are
-  permitted anywhere and become SQL NULL elements.
-- Mixed kinds (`[1, "two", true]`), nested (`[[1,2],[3,4]]`), all-null,
-  and empty arrays fall back to JSONB binding — use
-  `jsonb_array_elements*` in your SQL to unpack.
-- Int + float mixed promotes to `float8[]`.
+- **`items.type` wins.** When declared, the array binds as the
+  matching native Postgres array — including for empty and all-null
+  payloads. Wrong-typed elements are rejected at the request boundary
+  with `xs[i]: expected <type>, got <actual>` before any SQL runs.
+  Semantic types (`uuid`, `date`, `datetime`) also get strict
+  per-element format validation. Nulls are permitted anywhere and
+  become SQL NULL elements.
+- **Legacy: no `items:` block.** The runtime scalar-type heuristic
+  runs — non-null elements must all be the same scalar kind, int +
+  float mixed promotes to `float8[]`, and mixed kinds
+  (`[1, "two", true]`), nested (`[[1,2],[3,4]]`), all-null, and empty
+  arrays fall back to JSONB binding (use `jsonb_array_elements*` in
+  your SQL to unpack). New endpoints should declare `items:` — the
+  fallback exists for backward compatibility.
+- **Nested arrays / arrays of objects always bind as JSONB.**
+  Postgres arrays are physically flat (no native "array of array"
+  type), so `items: {type: array, items: {type: integer}}` still
+  binds JSONB at the wire — the declaration adds recursive
+  per-element *validation*, not a new native binding.
 - **SQLite has no native array type.** Arrays bind as a JSON string;
   use `json_each()` to unpack:
 

@@ -230,6 +230,17 @@ fn walk_method_dir(
         let (_, referenced) = rewrite_named_params(&sql, Dialect::Postgres);
         declaration::validate_against_sql(&declaration, &referenced)
             .map_err(|reason| declaration::invalid(entry.clone(), reason))?;
+        // Defaults go through the same coerce pipeline as caller-supplied
+        // values so a misdeclared default can't sit latent until someone
+        // happens to omit the param at request time.
+        crate::query::validate_declaration_defaults(&declaration)
+            .map_err(|reason| declaration::invalid(entry.clone(), reason))?;
+        // Enum entries get the same semantic-format check as caller
+        // values so a `type: uuid, enum: [..., "not-a-uuid"]`
+        // declaration can't ship a dead entry that no valid request
+        // could ever match.
+        crate::query::validate_declaration_enum_formats(&declaration)
+            .map_err(|reason| declaration::invalid(entry.clone(), reason))?;
         let transactional = parse_transactional_marker(&sql);
         index.insert(SavedQuery {
             project: project.to_string(),

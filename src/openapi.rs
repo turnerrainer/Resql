@@ -28,7 +28,7 @@
 //! at emit time so `diff` on the spec is meaningful across restarts.
 
 use crate::config::OpenApiConfig;
-use crate::declaration::{Declaration, DeclaredParam, ParamType, ReturnField};
+use crate::declaration::{Declaration, DeclaredParam, ItemType, ParamType, ReturnField};
 use crate::loader::{HttpMethod, QueryIndex, SavedQuery};
 use serde_json::{json, Map, Value};
 
@@ -304,24 +304,36 @@ fn param_schema(spec: &DeclaredParam) -> Value {
         m.insert("enum".into(), Value::Array(allowed.clone()));
     }
     if spec.ty == ParamType::Array {
-        let items_type = spec
-            .items
-            .as_ref()
-            .map(|i| i.ty.openapi_type())
-            .unwrap_or("string");
-        let items_format = spec.items.as_ref().and_then(|i| {
-            i.format
-                .clone()
-                .or_else(|| i.ty.openapi_format().map(str::to_string))
-        });
-        let mut items = json!({"type": items_type});
-        if let Some(f) = items_format {
-            items
-                .as_object_mut()
-                .unwrap()
-                .insert("format".into(), Value::String(f));
-        }
-        m.insert("items".into(), items);
+        m.insert("items".into(), items_schema(spec.items.as_deref()));
+    }
+    Value::Object(m)
+}
+
+/// Emit an OpenAPI `items` schema, recursing through nested
+/// `items.items` so an `items: {type: array, items: {type: integer}}`
+/// declaration renders as `array of array of integer` (JSON Schema
+/// nested items form) instead of just `array of array`.
+///
+/// A missing `items` block defaults to `{"type": "string"}` — the
+/// old behaviour before this helper was extracted; keep it so a
+/// legacy declaration without `items:` still emits a well-formed
+/// schema instead of no `items` at all (JSON Schema requires
+/// `items` for arrays in strict validators).
+fn items_schema(spec: Option<&ItemType>) -> Value {
+    let Some(it) = spec else {
+        return json!({"type": "string"});
+    };
+    let mut m = Map::new();
+    m.insert("type".into(), Value::String(it.ty.openapi_type().into()));
+    if let Some(f) = it
+        .format
+        .clone()
+        .or_else(|| it.ty.openapi_format().map(str::to_string))
+    {
+        m.insert("format".into(), Value::String(f));
+    }
+    if it.ty == ParamType::Array {
+        m.insert("items".into(), items_schema(it.items.as_deref()));
     }
     Value::Object(m)
 }
@@ -563,6 +575,57 @@ UPDATE users SET status = :status;
         let props = &spec["paths"]["/crm/users/set-status"]["post"]["requestBody"]["content"]
             ["application/json"]["schema"]["properties"];
         assert_eq!(props["status"]["enum"], json!(["active", "disabled"]));
+    }
+
+    #[test]
+    fn array_items_emit_nested_schema() {
+        // Corner 6: `items: {type: array, items: {type: integer}}`
+        // should render as JSON Schema `array of array of integer`,
+        // not just `array of array` with untyped inner elements.
+        let sql = "/*\nparams:\n  xs: { type: array, items: { type: array, items: { type: integer } } }\n*/\nSELECT :xs;\n";
+        let (decl, sql_body) = crate::declaration::parse(sql).unwrap();
+        let mut idx = QueryIndex::default();
+        idx.insert(SavedQuery {
+            project: "crm".into(),
+            method: HttpMethod::Post,
+            path: "nested".into(),
+            sql: sql_body,
+            source_file: PathBuf::from("crm/POST/nested.sql"),
+            transactional: false,
+            declaration: decl,
+        })
+        .unwrap();
+        let spec = build_spec(&idx, &OpenApiConfig::default());
+        let props = &spec["paths"]["/crm/nested"]["post"]["requestBody"]["content"]
+            ["application/json"]["schema"]["properties"];
+        assert_eq!(props["xs"]["type"], "array");
+        assert_eq!(props["xs"]["items"]["type"], "array");
+        assert_eq!(props["xs"]["items"]["items"]["type"], "integer");
+        assert_eq!(props["xs"]["items"]["items"]["format"], "int64");
+    }
+
+    #[test]
+    fn array_items_uuid_carries_format() {
+        // Semantic types like uuid should carry their JSON Schema
+        // format on the items schema, not just on top-level scalars.
+        let sql = "/*\nparams:\n  ids: { type: array, items: { type: uuid } }\n*/\nSELECT :ids;\n";
+        let (decl, sql_body) = crate::declaration::parse(sql).unwrap();
+        let mut idx = QueryIndex::default();
+        idx.insert(SavedQuery {
+            project: "crm".into(),
+            method: HttpMethod::Post,
+            path: "ids".into(),
+            sql: sql_body,
+            source_file: PathBuf::from("crm/POST/ids.sql"),
+            transactional: false,
+            declaration: decl,
+        })
+        .unwrap();
+        let spec = build_spec(&idx, &OpenApiConfig::default());
+        let items = &spec["paths"]["/crm/ids"]["post"]["requestBody"]["content"]
+            ["application/json"]["schema"]["properties"]["ids"]["items"];
+        assert_eq!(items["type"], "string");
+        assert_eq!(items["format"], "uuid");
     }
 
     #[test]

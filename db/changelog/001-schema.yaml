@@ -140,3 +140,60 @@ databaseChangeLog:
             tableName: daily_stats
             columnNames: day, region
             constraintName: pk_daily_stats
+
+  - changeSet:
+      id: 006-posts-table
+      author: rainer
+      changes:
+        - sql:
+            splitStatements: false
+            sql: |
+              CREATE TABLE posts (
+                id BIGSERIAL PRIMARY KEY,
+                title TEXT NOT NULL,
+                categories TEXT[] NOT NULL DEFAULT '{}'
+              );
+
+  - changeSet:
+      id: 007-array-targets-table
+      author: rainer
+      changes:
+        - sql:
+            splitStatements: false
+            sql: |
+              CREATE TABLE array_targets (
+                id BIGSERIAL PRIMARY KEY,
+                ints BIGINT[] NOT NULL DEFAULT '{}',
+                floats DOUBLE PRECISION[] NOT NULL DEFAULT '{}',
+                flags BOOLEAN[] NOT NULL DEFAULT '{}'
+              );
+
+  - changeSet:
+      id: 008-semantic-array-targets-table
+      author: rainer
+      changes:
+        - sql:
+            splitStatements: false
+            sql: |
+              CREATE TABLE semantic_arrays (
+                id BIGSERIAL PRIMARY KEY,
+                uuids UUID[] NOT NULL DEFAULT '{}',
+                dates DATE[] NOT NULL DEFAULT '{}',
+                timestamps TIMESTAMPTZ[] NOT NULL DEFAULT '{}'
+              );
+
+  - changeSet:
+      id: 009-decimal-jsonb-array-columns
+      author: rainer
+      changes:
+        - sql:
+            splitStatements: false
+            sql: |
+              CREATE TABLE decimal_arrays (
+                id BIGSERIAL PRIMARY KEY,
+                amounts NUMERIC(12,2)[] NOT NULL DEFAULT '{}'
+              );
+              CREATE TABLE jsonb_arrays (
+                id BIGSERIAL PRIMARY KEY,
+                docs JSONB[] NOT NULL DEFAULT '{}'
+              );
