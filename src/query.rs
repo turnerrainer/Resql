@@ -1338,7 +1338,11 @@ fn pg_column_value(row: &PgRow, idx: usize, ty: &str) -> Value {
     // fails to decode and the whole column comes back as JSON null.
     if ty_upper.starts_with("_NUMERIC") || ty_upper == "NUMERIC[]" || ty_upper == "DECIMAL[]" {
         if let Ok(Some(v)) = row.try_get::<Option<Vec<sqlx::types::Decimal>>, _>(idx) {
-            return Value::Array(v.into_iter().map(|d| Value::String(d.to_string())).collect());
+            return Value::Array(
+                v.into_iter()
+                    .map(|d| Value::String(d.to_string()))
+                    .collect(),
+            );
         }
     }
     // JSON / JSONB arrays: unwrap each element's `sqlx::types::Json`
