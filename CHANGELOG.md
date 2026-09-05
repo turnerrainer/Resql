@@ -55,6 +55,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Startup emits one `datasource connected` INFO line per pool with the
   masked-password URL so operators can still verify connection
   topology without exposing it on the wire. (R5)
+- **Batch endpoint errors no longer leak underlying SQL detail.**
+  Previously a failing `POST /:project/:path/batch` returned the raw
+  driver error text — which for Postgres includes constraint,
+  column, and table names, and for SQLite includes messages like
+  `UNIQUE constraint failed: t.login`. Attackers could iterate a
+  batch to probe schema. Now the caller sees
+  `Batch failed at statement N of M, rolled back` (with the failing
+  position and total, but no driver detail). The full underlying
+  error is logged at WARN so operators can still diagnose. HTTP
+  status and `error` field are unchanged (`400`,
+  `BadSqlGrammarException`) so existing callers that only branch on
+  status still work. (R9)
 
 ### Reliability (v1 pre-publication audit — h2ck.me)
 

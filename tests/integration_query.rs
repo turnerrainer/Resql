@@ -357,6 +357,21 @@ async fn batch_rolls_back_on_error_no_partial_writes() {
     assert_eq!(status, 400);
     assert_eq!(body["error"], "BadSqlGrammarException");
 
+    // R9: the response identifies the failing position and total but
+    // must NOT include the underlying UNIQUE-constraint detail. That
+    // detail stays in the server log, not the caller-visible body.
+    let msg = body["message"].as_str().unwrap();
+    assert!(
+        msg.contains("2 of 3"),
+        "expected position + size in message, got: {msg}"
+    );
+    assert!(msg.contains("rolled back"), "message = {msg}");
+    let msg_lc = msg.to_ascii_lowercase();
+    assert!(
+        !msg_lc.contains("unique") && !msg_lc.contains("constraint"),
+        "batch error message must not reveal SQL error detail: {msg}"
+    );
+
     // The first insert must have rolled back with the failing one — 0 rows.
     let (s2, count_body) = app.request("GET", "/demo/count", None, &[]).await;
     assert_eq!(s2, 200);

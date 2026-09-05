@@ -58,6 +58,14 @@ pub enum ResqlError {
         "X-Datasource '{requested}' is not permitted for project '{project}' (not in allowlist)"
     )]
     ForbiddenDatasourceOverride { project: String, requested: String },
+
+    /// Generic batch failure — reveals only the failing statement's
+    /// position and the batch size, never the underlying Postgres /
+    /// SQLite error text. The full detail is emitted at WARN in the
+    /// server log so operators can debug without the caller seeing
+    /// which constraint / table / column tripped.
+    #[error("Batch failed at statement {index} of {total}, rolled back")]
+    BatchStatementFailed { index: usize, total: usize },
 }
 
 impl ResqlError {
@@ -79,6 +87,7 @@ impl ResqlError {
             ResqlError::ForbiddenDatasourceOverride { .. } => {
                 "ForbiddenDatasourceOverrideException"
             }
+            ResqlError::BatchStatementFailed { .. } => "BadSqlGrammarException",
         }
     }
 

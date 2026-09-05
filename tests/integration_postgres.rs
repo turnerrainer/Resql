@@ -537,6 +537,18 @@ async fn pg_batch_rolls_back_on_error() {
         .await;
     assert_eq!(status, 400);
     assert_eq!(body["error"], "BadSqlGrammarException");
+    // R9: caller-visible message identifies the failing position but
+    // must not disclose the Postgres error text (which would leak
+    // constraint / column / table names to the caller).
+    let msg = body["message"].as_str().unwrap();
+    assert!(msg.contains("2 of 3"), "msg = {msg}");
+    let msg_lc = msg.to_ascii_lowercase();
+    assert!(
+        !msg_lc.contains("duplicate")
+            && !msg_lc.contains("unique")
+            && !msg_lc.contains("constraint"),
+        "batch error must not leak Postgres detail: {msg}"
+    );
 
     // Iteration 1's login must NOT be persisted.
     let (s2, found) = app
