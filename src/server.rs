@@ -2,9 +2,9 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use axum::extract::{Path, Query, Request, State};
-use axum::http::{HeaderMap, HeaderName, HeaderValue, Method};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode};
 use axum::middleware::{self, Next};
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
@@ -219,11 +219,20 @@ async fn health_handler(State(state): State<AppState>) -> Json<health::HealthRes
     Json(health::build(state.start))
 }
 
-/// `/datasources` response entry. Shape mirrors Java's
-/// `DataSourceConfigProperties` (name, jdbcUrl, username, driverClassName)
-/// with the password field stripped (matches Java's `@JsonIgnore` on
-/// `password`). Field names are the Java-canonical camelCase forms so
-/// existing dashboards / grep patterns keep working.
+/// `/datasources` response entry.
+///
+/// Field names remain the Java-canonical camelCase so existing
+/// operator dashboards keep parsing, but the values are hardened:
+///
+/// - `jdbcUrl` is redacted to `<scheme>://<host>[:port]` — path,
+///   query, and userinfo (including password) are all stripped.
+/// - `username` is always the empty string. The real username stays
+///   in server logs at startup only.
+///
+/// Combined with the `admin.datasources_public` gate (default off,
+/// endpoint returns 404), this closes the enumeration lane R5 called
+/// out: an unauth caller learns nothing about which hosts, ports, or
+/// accounts back the service.
 #[derive(Serialize)]
 struct DatasourceView {
     name: String,
@@ -234,7 +243,12 @@ struct DatasourceView {
     driver_class_name: &'static str,
 }
 
-async fn list_datasources(State(state): State<AppState>) -> Json<Vec<DatasourceView>> {
+async fn list_datasources(State(state): State<AppState>) -> Response {
+    if !state.config.admin.datasources_public {
+        // 404 is indistinguishable from a non-mounted endpoint;
+        // unauth callers can't confirm the service is Resql.
+        return StatusCode::NOT_FOUND.into_response();
+    }
     let mut out = Vec::new();
     for name in state.registry.names() {
         let ds_cfg = state.config.datasources.iter().find(|d| d.name == name);
@@ -243,30 +257,55 @@ async fn list_datasources(State(state): State<AppState>) -> Json<Vec<DatasourceV
             Some(crate::db::Pool::Sqlite(_)) => "org.sqlite.JDBC",
             None => "",
         };
-        let jdbc_url = ds_cfg.map(|d| mask_password(&d.url)).unwrap_or_default();
-        let username = ds_cfg.map(|d| d.username.clone()).unwrap_or_default();
+        let jdbc_url = ds_cfg.map(|d| redact_url(&d.url)).unwrap_or_default();
         out.push(DatasourceView {
             name,
             jdbc_url,
-            username,
+            // Username never returned. Present in the response object
+            // as an empty string so JSON structure stays stable for
+            // existing consumers that iterate keys.
+            username: String::new(),
             driver_class_name,
         });
     }
-    Json(out)
+    Json(out).into_response()
 }
 
-fn mask_password(url: &str) -> String {
-    if let Some(scheme_end) = url.find("://") {
-        let (scheme, rest) = url.split_at(scheme_end + 3);
-        if let Some(at) = rest.find('@') {
-            let (userinfo, host) = rest.split_at(at);
-            if let Some(colon) = userinfo.find(':') {
-                let (user, _) = userinfo.split_at(colon);
-                return format!("{scheme}{user}:*****{host}");
-            }
+/// Redact a datasource URL down to `<scheme>://<host>[:port]`. Any
+/// userinfo, path, query, or fragment is dropped. This is the value
+/// exposed at `/datasources` — the full URL stays in server startup
+/// logs for operator visibility.
+///
+/// Non-URL-shaped inputs (SQLite's `sqlite::memory:`, `sqlite:file:x`)
+/// have the scheme returned with any tail stripped, so an
+/// operator can still see the driver without leaking the file path.
+pub(crate) fn redact_url(url: &str) -> String {
+    let Some(scheme_end) = url.find("://") else {
+        // No authority section (e.g. `sqlite::memory:`, `sqlite:foo.db`).
+        // Return just the scheme portion up to and including the first
+        // colon to hide any file path or in-memory identifier.
+        if let Some(colon) = url.find(':') {
+            return format!("{}:", &url[..colon]);
         }
+        return "***".into();
+    };
+    let scheme = &url[..scheme_end];
+    let rest = &url[scheme_end + 3..];
+    // Skip userinfo if present.
+    let after_userinfo = match rest.find('@') {
+        Some(at) => &rest[at + 1..],
+        None => rest,
+    };
+    // Cut at the first path/query/fragment separator.
+    let host_port_end = after_userinfo
+        .find(['/', '?', '#'])
+        .unwrap_or(after_userinfo.len());
+    let host_port = &after_userinfo[..host_port_end];
+    if host_port.is_empty() {
+        format!("{scheme}://")
+    } else {
+        format!("{scheme}://{host_port}")
     }
-    url.to_string()
 }
 
 async fn query_get(
@@ -433,16 +472,32 @@ mod tests {
     use axum::http::HeaderValue;
 
     #[test]
-    fn mask_password_hides_secret() {
+    fn redact_url_strips_userinfo_path_and_query() {
+        // Full userinfo + database path + query string all gone.
         assert_eq!(
-            mask_password("postgres://user:secret@host:5432/db"),
-            "postgres://user:*****@host:5432/db"
+            redact_url("postgres://user:secret@host:5432/db?sslmode=require"),
+            "postgres://host:5432"
         );
     }
 
     #[test]
-    fn mask_password_leaves_url_without_userinfo_alone() {
-        assert_eq!(mask_password("sqlite::memory:"), "sqlite::memory:");
+    fn redact_url_keeps_host_and_port_when_no_userinfo() {
+        assert_eq!(
+            redact_url("postgresql://internal-db.corp:5432/users_prod"),
+            "postgresql://internal-db.corp:5432"
+        );
+    }
+
+    #[test]
+    fn redact_url_hides_sqlite_paths() {
+        // SQLite URLs don't have a `//authority`; redact to just the
+        // scheme so the file path (which may include usernames or leak
+        // deployment topology) is not disclosed.
+        assert_eq!(redact_url("sqlite::memory:"), "sqlite:");
+        assert_eq!(
+            redact_url("sqlite:/var/lib/resql/audit.db"),
+            "sqlite:"
+        );
     }
 
     #[test]

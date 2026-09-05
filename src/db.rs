@@ -41,6 +41,16 @@ impl DatasourceRegistry {
         let mut reg = Self::default();
         for ds in configs {
             let pool = connect(ds).await?;
+            // Emit the full (un-redacted) URL at startup so operators
+            // still see the connection topology in logs. `/datasources`
+            // itself now only exposes the redacted form (R5). Password
+            // is stripped from the URL via `mask_password_in_url` so
+            // even the log line doesn't hold the secret.
+            tracing::info!(
+                datasource = %ds.name,
+                url = %mask_password_in_url(&ds.url),
+                "datasource connected"
+            );
             reg.insert(ds.name.clone(), pool);
         }
         Ok(reg)
@@ -85,6 +95,23 @@ pub async fn connect(ds: &DatasourceConfig) -> Result<Pool, ResqlError> {
 }
 
 pub type SharedRegistry = Arc<DatasourceRegistry>;
+
+/// Replace the password portion of a `scheme://user:pw@host/...` URL
+/// with `*****` for logging. Leaves any URL without userinfo (e.g.
+/// `sqlite::memory:`) untouched.
+fn mask_password_in_url(url: &str) -> String {
+    if let Some(scheme_end) = url.find("://") {
+        let (scheme, rest) = url.split_at(scheme_end + 3);
+        if let Some(at) = rest.find('@') {
+            let (userinfo, host) = rest.split_at(at);
+            if let Some(colon) = userinfo.find(':') {
+                let (user, _) = userinfo.split_at(colon);
+                return format!("{scheme}{user}:*****{host}");
+            }
+        }
+    }
+    url.to_string()
+}
 
 #[cfg(test)]
 mod tests {

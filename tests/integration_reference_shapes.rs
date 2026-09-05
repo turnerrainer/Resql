@@ -61,6 +61,11 @@ async fn datasources_response_keys_match_java_reference() {
 
     let app = TestAppBuilder::new()
         .with_datasources(&["crm"])
+        // Post-R5 default is that `/datasources` returns 404 unless the
+        // operator opts in. This shape test exists to lock the Java-
+        // canonical field names when the endpoint IS mounted; flip the
+        // flag on so the endpoint responds.
+        .datasources_public(true)
         .build()
         .await;
     let (status, body) = app.request("GET", "/datasources", None, &[]).await;

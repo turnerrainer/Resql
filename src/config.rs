@@ -39,6 +39,8 @@ pub struct Config {
     pub logging: LoggingConfig,
     #[serde(default)]
     pub openapi: OpenApiConfig,
+    #[serde(default)]
+    pub admin: AdminConfig,
     /// Diagnostics collected by the compat shim. Populated in
     /// `from_yaml_str`; consumed at boot by `main.rs`. Never serialized.
     #[serde(skip)]
@@ -86,6 +88,21 @@ pub struct DatasourceConfig {
     pub max_connections: u32,
     #[serde(default = "default_acquire_timeout")]
     pub acquire_timeout_seconds: u64,
+}
+
+/// Admin-facing behaviour toggles. Every field defaults to the safer
+/// (more locked-down) posture so a stock deployment surfaces the
+/// minimum reconnaissance surface. Operators lift restrictions
+/// explicitly per site.
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct AdminConfig {
+    /// When true, `GET /datasources` returns the (redacted) list. When
+    /// false (default), the endpoint returns 404 — indistinguishable
+    /// from a non-mounted endpoint, so unauth callers can't tell whether
+    /// the service is Resql at all.
+    #[serde(default)]
+    pub datasources_public: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]

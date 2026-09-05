@@ -41,6 +41,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   also rejected. Previously an operator (or attacker) with write
   access to the SQL directory could plant `sql/prod/GET/leak
   -> /etc/passwd` and have Resql read the target as SQL. (R4)
+- **`/datasources` now returns 404 by default; when enabled, output is
+  redacted.** New config gate `admin.datasources_public: bool`
+  (defaults to `false`) hides the endpoint entirely — unauth callers
+  can't distinguish Resql from a service that never mounted it.
+  Operators who need the endpoint set the flag to `true`, but even
+  then the response is hardened:
+  - `jdbcUrl` is redacted to `<scheme>://<host>[:port]` — path,
+    query, and userinfo are all stripped. SQLite URLs redact down to
+    just `sqlite:` so file paths don't leak deployment topology.
+  - `username` is always the empty string. The real value stays in
+    the operator's startup logs only.
+  Startup emits one `datasource connected` INFO line per pool with the
+  masked-password URL so operators can still verify connection
+  topology without exposing it on the wire. (R5)
 
 ## [0.1.2-alpha] - 2026-09-03
 
