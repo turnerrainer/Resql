@@ -6,6 +6,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security (v1 pre-publication audit — h2ck.me)
+
+- **`allow_datasource_header` now defaults to `false`, and every override
+  is gated by a per-project allowlist.** The `X-Datasource` header
+  previously let any caller route a request against a different
+  registered datasource, opening a lateral-move lane inside the service
+  trust boundary. New config field `datasource_header_allowlist:
+  { <project>: [<allowed datasource names>] }` — an override that names
+  a (project, datasource) pair not in this map now returns `403
+  ForbiddenDatasourceOverrideException`. The rejection message names
+  only the offender, not the set of registered datasources, so
+  attackers cannot enumerate the registry by sending guesses.
+  Operators who need header routing must set
+  `allow_datasource_header: true` **and** populate the allowlist. (R1)
+- **CORS defaults to closed.** `cors.allowed_origins` now defaults to
+  `""` — the CORS layer is not attached at all, so no
+  `Access-Control-Allow-Origin` header is emitted and browsers refuse
+  cross-origin reads. Operators who need cross-origin must set it
+  explicitly. (R2)
+- **CORS methods and headers narrowed when configured.** When
+  `cors.allowed_origins` is set, the layer now advertises only `GET`
+  and `POST` (the methods the router actually serves) and only the
+  request headers Resql actually reads (`content-type`,
+  `authorization`, `x-datasource`, `traceparent`). Previously all
+  methods and all headers were echoed back on preflight, expanding
+  the drive-by surface a malicious origin could exploit alongside R2. (R3)
+
 ## [0.1.2-alpha] - 2026-09-03
 
 Correctness release. Fixes issue #11 (declared `items.type` now drives array element validation and binding — empty typed arrays into native `text[]` columns work end-to-end) plus a batch of audit-cycle hardening the fix uncovered: silent-null decode bugs for `float8[]` / `bool[]` / `uuid[]` / `date[]` / `timestamptz[]` / `numeric[]` / `jsonb[]` columns, strict scalar `uuid` / `date` / `datetime` format validation, boot-time coerce checks for declared defaults + enum entries, and nested `items:` support for arrays-of-arrays. Every fix has an end-to-end integration test against a real Postgres column; the audit exposed and fixed several latent silent-data-loss bugs that hadn't been reported yet.

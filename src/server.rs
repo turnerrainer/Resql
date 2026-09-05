@@ -2,14 +2,14 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use axum::extract::{Path, Query, Request, State};
-use axum::http::{HeaderMap, HeaderName, HeaderValue};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, Method};
 use axum::middleware::{self, Next};
 use axum::response::Response;
 use axum::routing::get;
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::CorsLayer;
 use tower_http::limit::RequestBodyLimitLayer;
 use tracing::Instrument;
 
@@ -41,13 +41,21 @@ pub fn router(state: AppState) -> Router {
     let body_limit = state.config.server.max_body_bytes;
     let logging_for_layer = state.config.logging.clone();
 
-    Router::new()
+    let mut router = Router::new()
         .route("/health", get(health_handler))
         .route("/healthz", get(health_handler))
         .route("/datasources", get(list_datasources))
         .route("/openapi.json", get(openapi_handler))
-        .route("/:project/*tail", get(query_get).post(query_post))
-        .layer(cors)
+        .route("/:project/*tail", get(query_get).post(query_post));
+
+    // Only attach a CORS layer when explicitly configured. Absent
+    // configuration means no `Access-Control-Allow-Origin` header on
+    // responses, so browsers block cross-origin reads (R2).
+    if let Some(layer) = cors {
+        router = router.layer(layer);
+    }
+
+    router
         .layer(RequestBodyLimitLayer::new(body_limit))
         .layer(middleware::from_fn(move |req, next| {
             let cfg = logging_for_layer.clone();
@@ -165,10 +173,32 @@ async fn openapi_handler(State(state): State<AppState>) -> Json<Value> {
     Json((*state.openapi).clone())
 }
 
-fn build_cors(allowed: &str) -> CorsLayer {
-    let base = CorsLayer::new().allow_methods(Any).allow_headers(Any);
-    if allowed.trim() == "*" {
-        return base.allow_origin(Any);
+/// Build a CORS layer from the `cors.allowed_origins` config.
+///
+/// - Empty / whitespace → `None`: no layer attached; browsers block
+///   cross-origin responses (R2).
+/// - `"*"` → wildcard origin, still with narrow methods and headers
+///   (R3). No `.allow_credentials(true)` — cookies won't ride along.
+/// - Comma-separated hosts → explicit origin allowlist.
+///
+/// Methods are limited to GET and POST because the router only serves
+/// those (R3). Headers are limited to the request headers Resql
+/// actually reads.
+fn build_cors(allowed: &str) -> Option<CorsLayer> {
+    let allowed = allowed.trim();
+    if allowed.is_empty() {
+        return None;
+    }
+    let base = CorsLayer::new()
+        .allow_methods([Method::GET, Method::POST])
+        .allow_headers([
+            HeaderName::from_static("content-type"),
+            HeaderName::from_static("authorization"),
+            HeaderName::from_static(DATASOURCE_HEADER),
+            HeaderName::from_static(TRACEPARENT_HEADER),
+        ]);
+    if allowed == "*" {
+        return Some(base.allow_origin(tower_http::cors::Any));
     }
     let origins: Vec<axum::http::HeaderValue> = allowed
         .split(',')
@@ -177,9 +207,11 @@ fn build_cors(allowed: &str) -> CorsLayer {
         .filter_map(|s| axum::http::HeaderValue::from_str(s).ok())
         .collect();
     if origins.is_empty() {
-        base.allow_origin(Any)
+        // Config was non-empty but nothing parsed. Treat the same as
+        // empty — deny — rather than silently opening to `Any`.
+        None
     } else {
-        base.allow_origin(origins)
+        Some(base.allow_origin(origins))
     }
 }
 
@@ -287,7 +319,7 @@ async fn dispatch(
         .index
         .get(method, &project_key, &tail)
         .ok_or_else(|| ResqlError::QueryNotFound(format!("/{project}/{tail}")))?;
-    let ds_name = choose_datasource(&state.config, &project_key, &headers);
+    let ds_name = choose_datasource(&state.config, &project_key, &headers)?;
     let pool = state
         .registry
         .get(&ds_name)
@@ -312,7 +344,7 @@ async fn dispatch_batch(
         .index
         .get(HttpMethod::Post, &project_key, &tail)
         .ok_or_else(|| ResqlError::QueryNotFound(format!("/{project}/{tail}")))?;
-    let ds_name = choose_datasource(&state.config, &project_key, &headers);
+    let ds_name = choose_datasource(&state.config, &project_key, &headers)?;
     let pool = state
         .registry
         .get(&ds_name)
@@ -331,16 +363,53 @@ async fn dispatch_batch(
     Ok(Json(Value::Array(all)))
 }
 
-fn choose_datasource(cfg: &Config, project: &str, headers: &HeaderMap) -> String {
+/// Choose the datasource for a given project + headers.
+///
+/// - Default (no `X-Datasource`): project's own datasource via
+///   `datasource_for_project`.
+/// - `X-Datasource: <name>` when `allow_datasource_header` is true and
+///   the (project, name) pair is in `datasource_header_allowlist`:
+///   returns that name and logs the override at INFO.
+/// - `X-Datasource` present but `allow_datasource_header` is false:
+///   silently ignored (header routing is off).
+/// - `X-Datasource: <name>` present but (project, name) is not in the
+///   allowlist: returns `Forbidden` (R1). This includes projects that
+///   have no allowlist entry at all — every override is opt-in.
+fn choose_datasource(
+    cfg: &Config,
+    project: &str,
+    headers: &HeaderMap,
+) -> Result<String, ResqlError> {
     if cfg.allow_datasource_header {
         if let Some(v) = headers.get(DATASOURCE_HEADER).and_then(|h| h.to_str().ok()) {
             let trimmed = v.trim();
             if !trimmed.is_empty() {
-                return trimmed.to_string();
+                let allowed = cfg
+                    .datasource_header_allowlist
+                    .get(project)
+                    .map(|v| v.as_slice())
+                    .unwrap_or(&[]);
+                if !allowed.iter().any(|d| d == trimmed) {
+                    tracing::warn!(
+                        resql.project = %project,
+                        override_to = %trimmed,
+                        "X-Datasource override rejected: not in allowlist"
+                    );
+                    return Err(ResqlError::ForbiddenDatasourceOverride {
+                        project: project.to_string(),
+                        requested: trimmed.to_string(),
+                    });
+                }
+                tracing::info!(
+                    resql.project = %project,
+                    override_to = %trimmed,
+                    "X-Datasource override accepted"
+                );
+                return Ok(trimmed.to_string());
             }
         }
     }
-    cfg.datasource_for_project(project)
+    Ok(cfg.datasource_for_project(project))
 }
 
 /// Convenience: build a full AppState from a Config, connecting all
@@ -380,15 +449,30 @@ mod tests {
     fn choose_datasource_defaults_to_project_name() {
         let cfg = Config::from_yaml_str("sql_dir: ./sql\n").unwrap();
         let headers = HeaderMap::new();
-        assert_eq!(choose_datasource(&cfg, "crm", &headers), "crm");
+        assert_eq!(
+            choose_datasource(&cfg, "crm", &headers).unwrap(),
+            "crm"
+        );
     }
 
     #[test]
-    fn choose_datasource_respects_header_when_allowed() {
-        let cfg = Config::from_yaml_str("sql_dir: ./sql\nallow_datasource_header: true\n").unwrap();
+    fn choose_datasource_respects_header_when_allowed_and_allowlisted() {
+        let yaml = r#"
+sql_dir: ./sql
+allow_datasource_header: true
+datasource_header_allowlist:
+  crm: [other]
+datasources:
+  - name: other
+    url: "sqlite::memory:"
+"#;
+        let cfg = Config::from_yaml_str(yaml).unwrap();
         let mut headers = HeaderMap::new();
         headers.insert(DATASOURCE_HEADER, HeaderValue::from_static("other"));
-        assert_eq!(choose_datasource(&cfg, "crm", &headers), "other");
+        assert_eq!(
+            choose_datasource(&cfg, "crm", &headers).unwrap(),
+            "other"
+        );
     }
 
     #[test]
@@ -397,7 +481,10 @@ mod tests {
             Config::from_yaml_str("sql_dir: ./sql\nallow_datasource_header: false\n").unwrap();
         let mut headers = HeaderMap::new();
         headers.insert(DATASOURCE_HEADER, HeaderValue::from_static("other"));
-        assert_eq!(choose_datasource(&cfg, "crm", &headers), "crm");
+        assert_eq!(
+            choose_datasource(&cfg, "crm", &headers).unwrap(),
+            "crm"
+        );
     }
 
     #[test]
@@ -412,22 +499,79 @@ datasources:
 "#;
         let cfg = Config::from_yaml_str(yaml).unwrap();
         let headers = HeaderMap::new();
-        assert_eq!(choose_datasource(&cfg, "crm", &headers), "db1");
+        assert_eq!(choose_datasource(&cfg, "crm", &headers).unwrap(), "db1");
     }
 
     #[test]
-    fn choose_datasource_header_overrides_even_a_mapped_project() {
+    fn choose_datasource_header_rejected_without_allowlist_entry() {
+        // allow_datasource_header is on, but no allowlist entry for the
+        // project → header override is refused (R1).
         let yaml = r#"
 sql_dir: ./sql
-project_datasource_map:
-  crm: db1
+allow_datasource_header: true
 datasources:
   - name: db1
     url: "sqlite::memory:"
 "#;
         let cfg = Config::from_yaml_str(yaml).unwrap();
         let mut headers = HeaderMap::new();
+        headers.insert(DATASOURCE_HEADER, HeaderValue::from_static("db1"));
+        let err = choose_datasource(&cfg, "crm", &headers).unwrap_err();
+        assert!(
+            matches!(err, ResqlError::ForbiddenDatasourceOverride { .. }),
+            "err = {err:?}"
+        );
+    }
+
+    #[test]
+    fn choose_datasource_header_rejected_when_not_in_allowlist() {
+        let yaml = r#"
+sql_dir: ./sql
+allow_datasource_header: true
+datasource_header_allowlist:
+  crm: [db1]
+datasources:
+  - name: db1
+    url: "sqlite::memory:"
+  - name: db2
+    url: "sqlite::memory:"
+"#;
+        let cfg = Config::from_yaml_str(yaml).unwrap();
+        let mut headers = HeaderMap::new();
         headers.insert(DATASOURCE_HEADER, HeaderValue::from_static("db2"));
-        assert_eq!(choose_datasource(&cfg, "crm", &headers), "db2");
+        let err = choose_datasource(&cfg, "crm", &headers).unwrap_err();
+        assert!(matches!(err, ResqlError::ForbiddenDatasourceOverride { .. }));
+    }
+
+    #[test]
+    fn choose_datasource_empty_header_falls_through() {
+        // A blank/whitespace-only header value is treated as absent.
+        let yaml = r#"
+sql_dir: ./sql
+allow_datasource_header: true
+datasources:
+  - name: crm
+    url: "sqlite::memory:"
+"#;
+        let cfg = Config::from_yaml_str(yaml).unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(DATASOURCE_HEADER, HeaderValue::from_static("   "));
+        assert_eq!(choose_datasource(&cfg, "crm", &headers).unwrap(), "crm");
+    }
+
+    #[test]
+    fn build_cors_none_when_empty() {
+        assert!(build_cors("").is_none());
+        assert!(build_cors("   ").is_none());
+    }
+
+    #[test]
+    fn build_cors_some_when_wildcard() {
+        assert!(build_cors("*").is_some());
+    }
+
+    #[test]
+    fn build_cors_some_when_specific_origin() {
+        assert!(build_cors("https://app.example.com").is_some());
     }
 }

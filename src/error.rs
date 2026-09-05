@@ -53,6 +53,11 @@ pub enum ResqlError {
 
     #[error("Internal error: {0}")]
     Internal(String),
+
+    #[error(
+        "X-Datasource '{requested}' is not permitted for project '{project}' (not in allowlist)"
+    )]
+    ForbiddenDatasourceOverride { project: String, requested: String },
 }
 
 impl ResqlError {
@@ -71,6 +76,7 @@ impl ResqlError {
             ResqlError::BodyTooLarge => "PayloadTooLargeException",
             ResqlError::MalformedRequest(_) => "MalformedRequestException",
             ResqlError::Internal(_) => "InternalError",
+            ResqlError::ForbiddenDatasourceOverride { .. } => "ForbiddenDatasourceOverrideException",
         }
     }
 
@@ -78,6 +84,7 @@ impl ResqlError {
         match self {
             ResqlError::BodyTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
             ResqlError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            ResqlError::ForbiddenDatasourceOverride { .. } => StatusCode::FORBIDDEN,
             _ => StatusCode::BAD_REQUEST,
         }
     }
