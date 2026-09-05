@@ -288,6 +288,11 @@ impl Config {
     }
 
     fn validate(&self) -> Result<(), ResqlError> {
+        if self.server.request_timeout_seconds == 0 {
+            return Err(ResqlError::Internal(
+                "server.request_timeout_seconds must be > 0 — a zero value would allow slow queries to exhaust the connection pool".into(),
+            ));
+        }
         let mut seen = std::collections::HashSet::new();
         for ds in &self.datasources {
             if !seen.insert(ds.name.clone()) {
@@ -528,5 +533,19 @@ datasources:
     fn urlencode_percent_encodes_special_chars() {
         assert_eq!(urlencode("p@ss w/ord!"), "p%40ss%20w%2Ford%21");
         assert_eq!(urlencode("simple"), "simple");
+    }
+
+    #[test]
+    fn zero_request_timeout_rejected() {
+        let yaml = r#"
+sql_dir: ./sql
+server:
+  request_timeout_seconds: 0
+"#;
+        let err = Config::from_yaml_str(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("request_timeout_seconds"),
+            "err = {err:?}"
+        );
     }
 }

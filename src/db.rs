@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
-use sqlx::{PgPool, SqlitePool};
+use sqlx::{Executor, PgPool, SqlitePool};
 
 use crate::config::DatasourceConfig;
 use crate::error::ResqlError;
@@ -38,9 +38,22 @@ impl DatasourceRegistry {
     }
 
     pub async fn connect_all(configs: &[DatasourceConfig]) -> Result<Self, ResqlError> {
+        Self::connect_all_with_timeout(configs, None).await
+    }
+
+    /// Same as `connect_all`, but sets `statement_timeout` on every
+    /// Postgres connection so long-running queries are killed at the
+    /// database side even if the Rust future outlives the HTTP timeout.
+    /// The value is applied only to Postgres pools; SQLite has no
+    /// equivalent server-side kill switch (queries run in-process and
+    /// respect the middleware timeout via future cancellation).
+    pub async fn connect_all_with_timeout(
+        configs: &[DatasourceConfig],
+        statement_timeout_secs: Option<u64>,
+    ) -> Result<Self, ResqlError> {
         let mut reg = Self::default();
         for ds in configs {
-            let pool = connect(ds).await?;
+            let pool = connect(ds, statement_timeout_secs).await?;
             // Emit the full (un-redacted) URL at startup so operators
             // still see the connection topology in logs. `/datasources`
             // itself now only exposes the redacted form (R5). Password
@@ -57,20 +70,35 @@ impl DatasourceRegistry {
     }
 }
 
-pub async fn connect(ds: &DatasourceConfig) -> Result<Pool, ResqlError> {
+pub async fn connect(
+    ds: &DatasourceConfig,
+    statement_timeout_secs: Option<u64>,
+) -> Result<Pool, ResqlError> {
     let url = ds.resolved_url()?;
     if url.starts_with("postgres://") || url.starts_with("postgresql://") {
         let opts: PgConnectOptions = url.parse().map_err(|e| {
             ResqlError::Internal(format!("bad Postgres URL for '{}': {e}", ds.name))
         })?;
-        let pool = PgPoolOptions::new()
+        // Apply statement_timeout on every connection the pool hands
+        // out. Postgres accepts an integer number of milliseconds via
+        // `SET`; a value of 0 disables the timeout server-side.
+        let statement_timeout_ms = statement_timeout_secs.map(|s| s.saturating_mul(1000));
+        let mut pool_opts = PgPoolOptions::new()
             .max_connections(ds.max_connections)
-            .acquire_timeout(Duration::from_secs(ds.acquire_timeout_seconds))
-            .connect_with(opts)
-            .await
-            .map_err(|e| {
-                ResqlError::Internal(format!("cannot connect datasource '{}': {e}", ds.name))
-            })?;
+            .acquire_timeout(Duration::from_secs(ds.acquire_timeout_seconds));
+        if let Some(ms) = statement_timeout_ms {
+            let sql = format!("SET statement_timeout = {ms}");
+            pool_opts = pool_opts.after_connect(move |conn, _meta| {
+                let sql = sql.clone();
+                Box::pin(async move {
+                    conn.execute(sql.as_str()).await?;
+                    Ok(())
+                })
+            });
+        }
+        let pool = pool_opts.connect_with(opts).await.map_err(|e| {
+            ResqlError::Internal(format!("cannot connect datasource '{}': {e}", ds.name))
+        })?;
         Ok(Pool::Postgres(pool))
     } else if url.starts_with("sqlite:") {
         let opts: SqliteConnectOptions = url
@@ -128,7 +156,7 @@ mod tests {
             max_connections: 1,
             acquire_timeout_seconds: 1,
         };
-        let pool = connect(&ds).await.unwrap();
+        let pool = connect(&ds, None).await.unwrap();
         assert!(matches!(pool, Pool::Sqlite(_)));
     }
 
@@ -143,7 +171,7 @@ mod tests {
             max_connections: 1,
             acquire_timeout_seconds: 1,
         };
-        let err = connect(&ds).await.unwrap_err();
+        let err = connect(&ds, None).await.unwrap_err();
         assert!(err.to_string().contains("unsupported"));
     }
 
