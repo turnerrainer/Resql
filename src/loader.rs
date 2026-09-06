@@ -150,13 +150,12 @@ pub fn load_dir(sql_dir: &Path) -> Result<QueryIndex, ResqlError> {
     // Canonicalise the root once so we can assert every resolved file
     // path is still under it (defence-in-depth against a symlink that
     // slipped past the walk-time check).
-    let canonical_root =
-        sql_dir
-            .canonicalize()
-            .map_err(|e| ResqlError::InvalidDirectory {
-                path: sql_dir.to_path_buf(),
-                reason: format!("cannot canonicalise: {e}"),
-            })?;
+    let canonical_root = sql_dir
+        .canonicalize()
+        .map_err(|e| ResqlError::InvalidDirectory {
+            path: sql_dir.to_path_buf(),
+            reason: format!("cannot canonicalise: {e}"),
+        })?;
 
     let mut index = QueryIndex::default();
     for project_entry in read_dir_sorted(sql_dir)? {
