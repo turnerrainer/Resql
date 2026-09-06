@@ -1,13 +1,17 @@
 # HANDOFF
 
-**Written:** 2026-07-29 (Postgres/Liquibase addendum 2026-07-30)
-**Last verified green (local):** 2026-07-30 — cargo test 93/0/0 with `TEST_POSTGRES_URL` set (49 unit + 44 integration incl. 16 Postgres); fmt + clippy -D warnings clean; cargo audit + deny clean; mdbook + linkcheck clean; docker build + smoke pass on the multi-DB demo.
-**Branch:** `refacto/spec-compliance-v1` (working). `dev` (default) still points at v0.1.0-alpha.1 (2026-07-31 publish).
-**Release status:** v0.1.0-alpha.1 published 2026-07-31 (`docker.io/turnerrainer/resql:0.1.0-alpha.1`, `ghcr.io/turnerrainer/resql:0.1.0-alpha.1`, cosign-signed). **v0.1.0-alpha.2 is prepared on `refacto/spec-compliance-v1` but not yet published** — it adds task 007 (atomic batch + native Postgres array binding), task 003 (per-file `@transactional` marker), and the Java-compat layer landed since alpha.1.
+**Written:** 2026-07-29 (Postgres/Liquibase addendum 2026-07-30; v1 audit close-out 2026-09-06)
+**Last verified green (local):** 2026-07-30 — cargo test 93/0/0 with `TEST_POSTGRES_URL` set (49 unit + 44 integration incl. 16 Postgres); fmt + clippy -D warnings clean; cargo audit + deny clean; mdbook + linkcheck clean; docker build + smoke pass on the multi-DB demo. (Post-v1-audit, `dev` also carries the R1–R7+R9 fix stack — CI green on every merged PR.)
+**Branches:** `dev` (default) is the release integration line. `refacto/spec-compliance-v1` is the operator's long-running working branch.
+**Release status:** `Cargo.toml` on `dev` is at `0.1.2-alpha` (git tag shipped, container not yet re-published — last published container is `0.1.1-alpha`). **Next release: `0.2.0-alpha`** — closes the h2ck.me v1 pre-publication security audit. **MINOR bump because config defaults changed in ways that will break some existing deployments** — full list in [`CHANGELOG.md`](./CHANGELOG.md) `[Unreleased]` and a shorter operator-facing table in the [README `Upgrading to 0.2.0-alpha`](./README.md#upgrading-to-020-alpha) section.
 
-**Pending operator follow-ups:**
-- **Rotate the Docker Hub PAT.** The one used for `DOCKERHUB_TOKEN` was pasted in the release chat and should be considered compromised. Generate a new PAT, then re-set the secret: `echo -n '<new-pat>' | gh secret set DOCKERHUB_TOKEN --repo turnerrainer/Resql`.
-- **GHCR one-time repo link** (only needed before the *next* release): open https://github.com/users/turnerrainer/packages/container/resql/settings → Change visibility → Public → Manage Actions access → Add repository → `turnerrainer/Resql` → Write. First publish worked because `GITHUB_TOKEN`'s package-write scope was sufficient; subsequent versions in the personal namespace need the explicit link.
+**Pending operator follow-ups (in order):**
+1. **Bump `Cargo.toml`** `version = "0.1.2-alpha"` → `"0.2.0-alpha"` and rename the `## [Unreleased]` heading in `CHANGELOG.md` to `## [0.2.0-alpha] - <YYYY-MM-DD>` with the reference-link at the bottom of the file.
+2. **Tag + publish**: `git tag v0.2.0-alpha && git push origin v0.2.0-alpha`. `publish.yml` fires on tag push and pushes both `docker.io/turnerrainer/resql:0.2.0-alpha` and the GHCR image.
+3. **Update `README.md` Version block** to point at `0.2.0-alpha` once the container is live.
+4. **Rotate the Docker Hub PAT.** The one used for `DOCKERHUB_TOKEN` was pasted in the release chat and should be considered compromised. Generate a new PAT, then re-set the secret: `echo -n '<new-pat>' | gh secret set DOCKERHUB_TOKEN --repo turnerrainer/Resql`.
+5. **GHCR one-time repo link** (only needed before the *next* release): open https://github.com/users/turnerrainer/packages/container/resql/settings → Change visibility → Public → Manage Actions access → Add repository → `turnerrainer/Resql` → Write. First publish worked because `GITHUB_TOKEN`'s package-write scope was sufficient; subsequent versions in the personal namespace need the explicit link.
+6. **Announce the config breaks** to any downstream that consumes Resql images. The README table is the canonical short list; [`CLAUDE.md`](./CLAUDE.md#v1-security-audit-changes-breaking-for-existing-configs) has grep recipes + a paste-in Python auditor for a live `resql.yaml`.
 
 Next contributor (human or Claude) must:
 
@@ -22,10 +26,10 @@ Interface-compatible Rust rewrite of the [Bürokratt Resql](https://github.com/b
 - SQL files under `sql/<project>/<GET|POST>/<name>.sql` become endpoints at `<METHOD> /<project>/<name>`.
 - `:named` parameters bind from JSON body (POST) or query string (GET).
 - Result columns are snake→camel renamed; response is a JSON array.
-- Multi-datasource: project name → datasource, override via `X-Datasource` header or `project_datasource_map`.
+- Multi-datasource: project name → datasource, override via `X-Datasource` header (default OFF from 0.2.0-alpha; requires `allow_datasource_header: true` **and** a per-project `datasource_header_allowlist` entry) or `project_datasource_map`.
 - Health at `/health` (also `/healthz` alias).
-- Datasource listing at `/datasources` (passwords masked).
-- Batch endpoint at `<POST-path>/batch`.
+- Datasource listing at `/datasources` — **404 by default** from 0.2.0-alpha; set `admin.datasources_public: true` to expose it. Response is redacted regardless (`jdbcUrl` → `<scheme>://<host>[:port]`, `username` → `""`).
+- Batch endpoint at `<POST-path>/batch`. Failures now return the generic `Batch failed at statement N of M, rolled back` (no driver-detail leak).
 
 ## What's fixed vs JVM Resql
 
@@ -112,7 +116,7 @@ echo -n '<paste-token-here>' | gh secret set DOCKERHUB_TOKEN --repo turnerrainer
 cd /home/rainer/Desktop/Buerostack/Resql-on-Rust   # on-disk dir name is legacy; project name is Resql
 git remote add origin git@github.com:turnerrainer/Resql.git   # if not already
 git push -u origin dev
-git push origin v0.1.0-alpha.2
+git push origin v0.2.0-alpha         # or whichever version is being released
 ```
 
 The `publish.yml` workflow triggers on the tag push. Watch it:
@@ -133,10 +137,11 @@ Personal-namespace packages need an explicit repo link before `GITHUB_TOKEN` can
 
 ```bash
 docker logout && docker system prune -f
-docker pull docker.io/turnerrainer/resql:0.1.0-alpha.2
-docker run --rm -p 18080:8080 -d --name resql-live docker.io/turnerrainer/resql:0.1.0-alpha.2
+docker pull docker.io/turnerrainer/resql:0.2.0-alpha
+docker run --rm -p 18080:8080 -d --name resql-live docker.io/turnerrainer/resql:0.2.0-alpha
 sleep 2
 curl http://localhost:18080/health
+# From 0.2.0-alpha, /datasources is 404 unless admin.datasources_public:true is set.
 docker stop resql-live
 ```
 
@@ -213,22 +218,24 @@ Reviews are file-based inside the private h2ckme org — h2ck.me does not post G
 
 **h2ckme access**: private org; your GitHub account has read via org membership. Clone with `git clone git@github.com:h2ckme/Resql-on-Rust.git`.
 
-### Open v1 PRs on this repo
+### v1 PRs — CLOSED (merged 2026-09-06)
 
-| PR | Branch | Findings | h2ck.me verdict |
-|---|---|---|---|
-| [#13](https://github.com/turnerrainer/Resql/pull/13) | `fix/harden-routing-cors` | R1 datasource-header ACL, R2 CORS default-deny, R3 narrow methods+headers | ✅ pass |
-| [#14](https://github.com/turnerrainer/Resql/pull/14) | `fix/loader-symlinks` | R4 SQL loader symlink reject | ✅ pass |
-| [#15](https://github.com/turnerrainer/Resql/pull/15) | `fix/datasources-redact` | R5 `/datasources` 404-by-default + redact | ✅ pass |
-| [#16](https://github.com/turnerrainer/Resql/pull/16) | `fix/request-timeout` | R6 request timeout + R7 pool exhaustion (Postgres `statement_timeout` hook) | ✅ pass |
-| [#17](https://github.com/turnerrainer/Resql/pull/17) | `fix/batch-error-generic` | R9 batch endpoint generic error, no schema leak | ✅ pass |
+All 6 audit PRs merged into `dev`. Feature branches deleted post-merge.
+
+| PR | Findings | h2ck.me verdict |
+|---|---|---|
+| [#13](https://github.com/turnerrainer/Resql/pull/13) | R1 datasource-header ACL, R2 CORS default-deny, R3 narrow methods+headers | ✅ pass |
+| [#14](https://github.com/turnerrainer/Resql/pull/14) | R4 SQL loader symlink reject | ✅ pass |
+| [#15](https://github.com/turnerrainer/Resql/pull/15) | R5 `/datasources` 404-by-default + redact | ✅ pass |
+| [#16](https://github.com/turnerrainer/Resql/pull/16) | R6 request timeout + R7 pool exhaustion (Postgres `statement_timeout` hook) | ✅ pass |
+| [#17](https://github.com/turnerrainer/Resql/pull/17) | R9 batch endpoint generic error, no schema leak | ✅ pass |
+| [#18](https://github.com/turnerrainer/Resql/pull/18) | docs — this pipeline description | ✅ (docs, no security marker) |
 
 ### Next action for a maintainer landing here
 
-1. **Open each of the 5 PRs above** in order (they're independent — merge order doesn't matter). Read the linked h2ckme write-up per PR before merging.
-2. Skim the acceptance table + break-the-fix probes + nits in the write-up.
-3. **Merge each PR** on your release cadence (all 5 auto-verdict ✅ pass; no blockers). Suggested order: `#14` (loader) → `#13` (routing+CORS) → `#15` (datasources) → `#16` (timeout) → `#17` (batch). After merging, bump `Cargo.toml` + `CHANGELOG.md` and tag.
-4. **Wait ~2 weeks**, then h2ck.me opens `v2/` as an adversarial re-audit of the merged tree.
+1. **Release** — bump `Cargo.toml` to `0.2.0-alpha`, close the `[Unreleased]` CHANGELOG block, tag `v0.2.0-alpha`, push. See "Pending operator follow-ups" at the top of this file for the full 6-step release checklist.
+2. **Announce the breaking config defaults** to downstream consumers of the container. Canonical short list is the [README `Upgrading to 0.2.0-alpha`](./README.md#upgrading-to-020-alpha) table; grep recipes + a paste-in Python auditor for a live `resql.yaml` are in [`CLAUDE.md`](./CLAUDE.md#v1-security-audit-changes-breaking-for-existing-configs).
+3. **Wait ~2 weeks after publish**, then h2ck.me opens `v2/` as an adversarial re-audit of the merged + tagged tree.
 
 ### If a review says ⚠️ or ❌
 
