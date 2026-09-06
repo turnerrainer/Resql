@@ -23,17 +23,17 @@ Entry points worth knowing:
 - `src/config.rs` — `resql.yaml` schema + validation.
 - `src/error.rs` — `ResqlError` variants + `IntoResponse`.
 
-## Current + next version
+## Current version
 
-- **Current in `Cargo.toml`**: `0.1.2-alpha`.
-- **Last published container**: `docker.io/turnerrainer/resql:0.1.1-alpha` (README mentions this; `0.1.2-alpha` shipped as a git tag but the container tag lags).
-- **Next**: `0.2.0-alpha` — MINOR bump because the v1 security audit changed default behaviour in ways that will make existing configs behave differently or refuse to boot. See below.
+- **Latest published**: `0.2.0-alpha` — live on `docker.io/turnerrainer/resql:0.2.0-alpha` + `ghcr.io/turnerrainer/resql:0.2.0-alpha`, cosign-signed, published 2026-09-06.
+- **In `Cargo.toml` on `dev`**: `0.2.0-alpha`. Next merged commit that bumps `Cargo.toml` will auto-tag and auto-publish via `.github/workflows/auto-tag.yml` — no manual `git tag` needed.
 
 ## v1 security-audit changes (BREAKING for existing configs)
 
-Between `0.1.2-alpha` and the upcoming `0.2.0-alpha`, five audit fixes landed
-that flipped defaults or introduced required schema. Every one of them is a
-CHANGELOG [Unreleased] bullet with an `(RN)` tag. The user-visible impact:
+Between `0.1.2-alpha` and the shipped `0.2.0-alpha`, five audit fixes landed
+that flipped defaults or introduced required schema. Every one is a CHANGELOG
+`[0.2.0-alpha]` bullet with an `(RN)` tag. The user-visible impact — configs
+written against 0.1.x-alpha may behave differently or refuse to boot:
 
 ### 1. `allow_datasource_header` default `true → false` (R1)
 
@@ -139,6 +139,160 @@ else:
 PY
 ```
 
+## Best-practice `resql.yaml` for a hardened deployment
+
+This is what a `resql.yaml` should look like on a production-facing 0.2.0-alpha
+box behind a reverse proxy. Every field is exposed so the intent is explicit;
+comments explain why each choice is the safe posture. Copy this whole block,
+then delete anything that doesn't apply — omitted fields fall back to their
+(safe) defaults from `src/config.rs`.
+
+```yaml
+# ─── server surface ──────────────────────────────────────────────────────────
+server:
+  # Bind to loopback if a reverse proxy fronts the service (nginx, envoy,
+  # a k8s ingress). Only bind 0.0.0.0 if this container is the ingress.
+  bind: "127.0.0.1:8080"
+
+  # 1 MiB is enough for parameter-heavy POST bodies; larger bodies almost
+  # always indicate a client bug or an abuse. Structured 413 on overflow.
+  max_body_bytes: 1048576
+
+  # Wall-clock cap per request. Anything slower gets 504 + the pool
+  # connection released. Postgres pools also SET statement_timeout to
+  # this value in their after_connect hook, so cancelled queries die
+  # at the server too (belt-and-braces vs pool exhaustion). Never 0.
+  request_timeout_seconds: 30
+
+# ─── SQL tree ────────────────────────────────────────────────────────────────
+# Set this explicitly. The default (`./templates/`) exists for Java-compat
+# only. Any symlinks inside this tree are refused at load time (R4).
+sql_dir: "./sql"
+
+# ─── datasource routing ──────────────────────────────────────────────────────
+# Header-driven routing is a lateral-move lane inside the trust boundary.
+# Keep it OFF unless a specific caller genuinely needs it. If you enable it,
+# every (project, target-datasource) pair must be in the allowlist — an
+# override to an un-allow-listed pair returns 403 (R1).
+allow_datasource_header: false
+# datasource_header_allowlist:               # only when allow_datasource_header: true
+#   users:  [users, users_replica]
+#   audit:  [audit]
+
+# Explicit project→datasource map. Reads that route by project name still
+# work without this (project name resolves to the same-named datasource by
+# default), but stating it out loud is safer against typos.
+project_datasource_map:
+  users: users
+  audit: audit
+
+# Optional. Only set if you accept requests at the Java-legacy batch URL
+# shape `POST /:name/batch`. Leaving unset returns an actionable error
+# on that URL shape.
+# default_datasource: users
+
+# ─── datasources ─────────────────────────────────────────────────────────────
+# Passwords come from env vars — `password_env`, NOT `password`. Setting
+# `password` directly is Java-compat only; the compat shim emits a WARN
+# every time and the plaintext ends up on disk in a config file that
+# tends to leak into image layers and backups.
+datasources:
+  - name: users
+    url:          "postgres://users-db.internal:5432/users"
+    username:     "resql_users"
+    password_env: "RESQL_USERS_PASSWORD"
+    max_connections: 10          # default; raise carefully — pool exhaustion attack surface
+    acquire_timeout_seconds: 5   # default; sane back-pressure
+
+  - name: audit
+    url:          "postgres://audit-db.internal:5432/audit"
+    username:     "resql_audit"
+    password_env: "RESQL_AUDIT_PASSWORD"
+
+# ─── CORS ────────────────────────────────────────────────────────────────────
+# Default is empty → no CORS layer at all → browsers refuse cross-origin
+# reads (R2). Set an explicit origin allowlist only if a browser client
+# needs to call this Resql directly (usually it shouldn't — put a
+# same-origin proxy in front). Wildcard "*" still works but is a smell.
+cors:
+  allowed_origins: ""
+  # allowed_origins: "https://app.example.com,https://ops.example.com"
+
+# ─── admin endpoints ─────────────────────────────────────────────────────────
+# /datasources returns 404 by default → unauth callers can't fingerprint
+# Resql via this endpoint (R5). Only enable it if operators inside the
+# trust boundary rely on it — and even then the response is redacted
+# (`jdbcUrl` → scheme+host, `username` → empty). The un-redacted view
+# lives in the startup INFO log.
+admin:
+  datasources_public: false
+
+# ─── logging ─────────────────────────────────────────────────────────────────
+logging:
+  # Rust log-directive style. Bump the resql target to debug in staging,
+  # keep noisy dependencies at info.
+  level: "info,resql=debug"
+
+  # `text` is human-readable; switch to `json` in prod for aggregation.
+  format: "json"
+
+  # One INFO line per request with method/route/status/duration/trace_id.
+  # Leave on — it's the primary operational access log.
+  access_log: true
+
+  # Off in production — error `source()` chains can leak schema names
+  # from the underlying driver. On in dev only when actively debugging.
+  print_stack_trace: false
+
+  # Cap on any body content shipped into a log line.
+  max_body_bytes: 2048
+
+  # Case-insensitive JSON field names redacted at every nesting depth.
+  # Defaults are already good; extend for domain-specific secret shapes.
+  redact_body_fields:
+    - password
+    - pass
+    - secret
+    - token
+    - access_token
+    - refresh_token
+    - api_key
+    - authorization
+
+# ─── OpenAPI ─────────────────────────────────────────────────────────────────
+openapi:
+  title:       "My-Service Resql"
+  description: "SQL-files-as-REST endpoints for the my-service backend."
+  server_url:  "https://api.example.com/resql"
+```
+
+### Two common alternatives
+
+**Browser-facing Resql** — reverse proxy is same-origin so no CORS layer, but if you must expose Resql cross-origin, pin the allowlist. Never `"*"` on a service that touches user data:
+
+```yaml
+cors:
+  allowed_origins: "https://app.example.com"
+```
+
+**Legitimate `X-Datasource` header routing** — e.g. a workflow engine that reads a run's target-DB name off its trace context and passes it forward. Every (project, target) pair must be listed:
+
+```yaml
+allow_datasource_header: true
+datasource_header_allowlist:
+  runs: [runs_primary, runs_replica]
+  # projects NOT listed here reject every X-Datasource override with 403
+```
+
+### What NOT to do
+
+- **Never** set `password:` (plaintext). Always `password_env:`.
+- **Never** set `allow_datasource_header: true` without also setting `datasource_header_allowlist`. Enabling the header without the allowlist means every override 403s — worse UX than leaving the header off entirely.
+- **Never** set `request_timeout_seconds: 0`. Boot fails; the check exists because the alternative is pool exhaustion.
+- **Never** set `admin.datasources_public: true` on an internet-facing service. If ops needs the view, expose it via a separate internal-only route on the reverse proxy.
+- **Never** set `cors.allowed_origins: "*"` on any service that returns per-user data.
+- **Never** run Resql with `bind: 0.0.0.0:...` on a shared host without a firewall between it and the internet.
+
 ## Doing tasks in this repo
 
 Standard Rust workflow. Before touching code:
@@ -151,18 +305,18 @@ Standard Rust workflow. Before touching code:
 
 ## Post-audit repo hygiene facts
 
-- All 6 v1 audit PRs (#13–#18) merged into `dev` on 2026-09-06.
+- All 6 v1 audit PRs (#13–#18) merged into `dev` on 2026-09-06. Release PR (#20) tagged `v0.2.0-alpha`; container published by `publish.yml` the same day.
+- `.github/workflows/auto-tag.yml` (added by #21) auto-tags + auto-publishes on any future merge that bumps `Cargo.toml` version. Merges that don't bump are idempotent — the workflow short-circuits.
 - Feature branches from that cycle were deleted post-merge (local + remote).
-- h2ck.me v1 verdicts (all ✅) live at [`h2ckme/Resql-on-Rust/v1/PR-REVIEWS/`](https://github.com/h2ckme/Resql-on-Rust/tree/main/v1/PR-REVIEWS). The v2 adversarial re-audit opens ~2 weeks after the merged tree gets a container tag.
+- h2ck.me v1 verdicts (all ✅) live at [`h2ckme/Resql-on-Rust/v1/PR-REVIEWS/`](https://github.com/h2ckme/Resql-on-Rust/tree/main/v1/PR-REVIEWS). The v2 adversarial re-audit opens ~2 weeks after publish (so ~2026-09-20).
 - `refacto/spec-compliance-v1` is the operator's long-running working branch — do not touch without asking.
 
 ## Where to look next
 
 | Question | File |
 |---|---|
-| Full breaking-change bullets + operator upgrade notes | `CHANGELOG.md` `[Unreleased]` section |
+| Full breaking-change bullets + release notes | `CHANGELOG.md` |
 | Domain design (what Resql is/isn't) | `docs/DESIGN.md` |
-| Operator handoff (release procedure, publish steps, verification set) | `HANDOFF.md` |
 | Project rules (test hygiene, commit style, etc.) | `STANDARDS.md` |
 | Cross-project ruleset | `../DEV-REQUIREMENTS.md` |
 | h2ck.me audit trail (PR reviews, break-the-fix probes) | https://github.com/h2ckme/Resql-on-Rust |

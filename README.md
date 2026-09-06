@@ -42,11 +42,15 @@ the next container. Full text in [`CHANGELOG.md`](./CHANGELOG.md).
 **Auditing an existing config** — a paste-in script + per-key `grep`
 recipes live in [`CLAUDE.md`](./CLAUDE.md#fastest-way-to-audit-a-live-config).
 
+**Writing a new config** — a fully-annotated hardened reference
+`resql.yaml`, two common variants (browser-facing, legitimate header
+routing), and a *do-not-do* checklist live in [`CLAUDE.md`](./CLAUDE.md#best-practice-resqlyaml-for-a-hardened-deployment).
+Start from that block and delete anything that doesn't apply.
+
 ## Docs
 
 - **[Book](https://turnerrainer.github.io/Resql/)** — install, configure, extend.
 - [Design doc](./docs/DESIGN.md) — what Resql is and isn't.
-- [Claude / LLM brief](./CLAUDE.md) — shortest possible orientation, including the v1 audit breaking-change list.
-- [HANDOFF](./HANDOFF.md) — entry point for the next contributor.
+- [Claude / LLM brief](./CLAUDE.md) — shortest possible orientation, the v1 audit breaking-change list, **and a best-practice `resql.yaml` reference**.
 - [Standards](./STANDARDS.md) — project rules on top of the [ecosystem baseline](../DEV-REQUIREMENTS.md).
 - [Security disclosure](./SECURITY.md) — private channel for vulnerabilities.
