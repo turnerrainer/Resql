@@ -6,6 +6,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0-alpha] - 2026-09-06
+
+Security release. Closes the [h2ck.me](https://github.com/h2ckme) v1 pre-publication audit (findings R1–R7 + R9, all ✅). **MINOR bump because config defaults were flipped in ways that will make some existing `0.1.x-alpha` configs behave differently or refuse to boot.** See the [README `Upgrading to 0.2.0-alpha`](./README.md#upgrading-to-020-alpha) table for the operator-facing short list and [`CLAUDE.md`](./CLAUDE.md#v1-security-audit-changes-breaking-for-existing-configs) for grep recipes + a paste-in Python auditor.
+
 ### Security (v1 pre-publication audit — h2ck.me)
 
 - **`allow_datasource_header` now defaults to `false`, and every override
@@ -234,7 +238,8 @@ Spring Boot service. Interface-compatible with the original for the SQL-file-to-
 - Container image signed with cosign keyless via GHA OIDC.
 - Trivy HIGH/CRITICAL scan gates image signing.
 
-[Unreleased]: https://github.com/turnerrainer/Resql/compare/v0.1.2-alpha...HEAD
+[Unreleased]: https://github.com/turnerrainer/Resql/compare/v0.2.0-alpha...HEAD
+[0.2.0-alpha]: https://github.com/turnerrainer/Resql/releases/tag/v0.2.0-alpha
 [0.1.2-alpha]: https://github.com/turnerrainer/Resql/releases/tag/v0.1.2-alpha
 [0.1.1-alpha]: https://github.com/turnerrainer/Resql/releases/tag/v0.1.1-alpha
 [0.1.0-alpha.4]: https://github.com/turnerrainer/Resql/releases/tag/v0.1.0-alpha.4
