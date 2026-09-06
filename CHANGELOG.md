@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.2.0-alpha] - 2026-09-06
 
-Security release. Closes the [h2ck.me](https://github.com/h2ckme) v1 pre-publication audit (findings R1–R7 + R9, all ✅). **MINOR bump because config defaults were flipped in ways that will make some existing `0.1.x-alpha` configs behave differently or refuse to boot.** See the [README `Upgrading to 0.2.0-alpha`](./README.md#upgrading-to-020-alpha) table for the operator-facing short list and [`CLAUDE.md`](./CLAUDE.md#v1-security-audit-changes-breaking-for-existing-configs) for grep recipes + a paste-in Python auditor.
+Security release. Closes the [h2ck.me](https://github.com/h2ckme) v1 pre-publication audit (findings R1–R7 + R9, all ✅). **MINOR bump because config defaults were flipped in ways that will make some existing `0.1.x-alpha` configs behave differently or refuse to boot.** See the [README "Upgrading to 0.2.0-alpha"](https://github.com/turnerrainer/Resql/blob/dev/README.md#upgrading-to-020-alpha) table for the operator-facing short list and [`CLAUDE.md`](https://github.com/turnerrainer/Resql/blob/dev/CLAUDE.md#v1-security-audit-changes-breaking-for-existing-configs) for grep recipes + a paste-in Python auditor.
 
 ### Security (v1 pre-publication audit — h2ck.me)
 
