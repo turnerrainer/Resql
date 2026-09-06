@@ -164,6 +164,33 @@ impl TestAppBuilder {
             project_map.insert(k, v);
         }
 
+        // Build a permissive allowlist for tests: every project the SQL
+        // tree references may override to any registered datasource.
+        // Production defaults to empty (R1), but the test suite exercises
+        // routing behaviour; each `x_datasource_header_*` test that
+        // needs a stricter posture sets `allow_header(false)` or writes
+        // its own allowlist explicitly.
+        let mut header_allowlist: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        if self.allow_header {
+            let mut all_ds: Vec<String> = cfg_datasources.iter().map(|d| d.name.clone()).collect();
+            all_ds.sort();
+            all_ds.dedup();
+            let mut projects: std::collections::BTreeSet<String> =
+                std::collections::BTreeSet::new();
+            for (rel, _) in &self.files {
+                if let Some(first) = rel.split('/').next() {
+                    projects.insert(first.to_string());
+                }
+            }
+            for proj in project_map.keys() {
+                projects.insert(proj.clone());
+            }
+            for proj in projects {
+                header_allowlist.insert(proj, all_ds.clone());
+            }
+        }
+
         let config = Config {
             server: resql::config::ServerConfig {
                 bind: "127.0.0.1:0".into(),
@@ -173,6 +200,7 @@ impl TestAppBuilder {
             sql_dir: sql_root.clone(),
             project_datasource_map: project_map,
             allow_datasource_header: self.allow_header,
+            datasource_header_allowlist: header_allowlist,
             default_datasource: None,
             datasources: cfg_datasources,
             cors: resql::config::CorsConfig::default(),

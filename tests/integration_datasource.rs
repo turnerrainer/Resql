@@ -23,7 +23,11 @@ async fn x_datasource_header_routes_to_named_datasource() {
 }
 
 #[tokio::test]
-async fn x_datasource_header_with_unknown_name_is_400() {
+async fn x_datasource_header_with_unknown_name_is_forbidden() {
+    // Post-R1 semantics: an unrecognised value in the X-Datasource
+    // header is rejected by the per-project allowlist BEFORE Resql looks
+    // the name up in the datasource registry. Attackers can no longer
+    // enumerate which datasources exist by sending guesses.
     let app = TestAppBuilder::new()
         .with_datasources(&["primary"])
         .with_sql("demo/POST/x.sql", "SELECT 1 AS n")
@@ -32,8 +36,8 @@ async fn x_datasource_header_with_unknown_name_is_400() {
     let (status, body) = app
         .request("POST", "/demo/x", Some("{}"), &[("x-datasource", "nope")])
         .await;
-    assert_eq!(status, 400);
-    assert_eq!(body["error"], "UnknownDataSourceNameException");
+    assert_eq!(status, 403);
+    assert_eq!(body["error"], "ForbiddenDatasourceOverrideException");
     assert!(body["message"].as_str().unwrap().contains("'nope'"));
 }
 

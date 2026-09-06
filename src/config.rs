@@ -16,6 +16,16 @@ pub struct Config {
     pub project_datasource_map: HashMap<String, String>,
     #[serde(default = "default_allow_header")]
     pub allow_datasource_header: bool,
+    /// Per-project allowlist for `X-Datasource` overrides. Consulted
+    /// only when `allow_datasource_header` is true. Any (project,
+    /// header value) not present here → 403. An entry listed here that
+    /// names a datasource which is not in `datasources` → validation
+    /// error at boot (fail fast). Absence of a project key means "no
+    /// overrides allowed for that project"; the default when
+    /// `allow_datasource_header` is on and no entries exist is that
+    /// every header override is denied.
+    #[serde(default)]
+    pub datasource_header_allowlist: HashMap<String, Vec<String>>,
     /// If set, batch requests hitting the Java-legacy `POST /{name}/batch`
     /// URL shape use this datasource (Java hardcoded "byk"). If unset, the
     /// legacy shape is rejected with an actionable error.
@@ -211,7 +221,10 @@ fn default_timeout() -> u64 {
     30
 }
 fn default_allow_header() -> bool {
-    true
+    // Default OFF: header-driven datasource routing is a lateral-move
+    // lane inside the service trust boundary. Operators who need it
+    // must opt in explicitly and populate `datasource_header_allowlist`.
+    false
 }
 fn default_max_conns() -> u32 {
     10
@@ -220,7 +233,11 @@ fn default_acquire_timeout() -> u64 {
     5
 }
 fn default_cors() -> String {
-    "*".into()
+    // Default DENY: no CORS layer attached means no
+    // `Access-Control-Allow-Origin` header, so browsers refuse
+    // cross-origin responses. Operators who need cross-origin must
+    // set it explicitly.
+    "".into()
 }
 fn default_log_level() -> String {
     "info,resql=debug".into()
@@ -294,6 +311,15 @@ impl Config {
                 return Err(ResqlError::Internal(format!(
                     "default_datasource '{ds_name}' is not in datasources"
                 )));
+            }
+        }
+        for (project, allowed) in &self.datasource_header_allowlist {
+            for ds_name in allowed {
+                if !self.datasources.iter().any(|d| &d.name == ds_name) {
+                    return Err(ResqlError::Internal(format!(
+                        "datasource_header_allowlist for project '{project}' names '{ds_name}' which is not in datasources"
+                    )));
+                }
             }
         }
         Ok(())
@@ -371,8 +397,31 @@ mod tests {
         let cfg = Config::from_yaml_str("sql_dir: ./sql\n").unwrap();
         assert_eq!(cfg.server.bind, "0.0.0.0:8080");
         assert_eq!(cfg.server.max_body_bytes, 1_048_576);
-        assert!(cfg.allow_datasource_header);
+        assert!(
+            !cfg.allow_datasource_header,
+            "header routing must default OFF (R1)"
+        );
         assert!(cfg.datasources.is_empty());
+        assert!(cfg.datasource_header_allowlist.is_empty());
+        assert_eq!(
+            cfg.cors.allowed_origins, "",
+            "CORS must default to empty (R2)"
+        );
+    }
+
+    #[test]
+    fn allowlist_referencing_unknown_datasource_rejected() {
+        let yaml = r#"
+sql_dir: ./sql
+allow_datasource_header: true
+datasource_header_allowlist:
+  crm: [ghost]
+datasources:
+  - name: crm
+    url: "sqlite::memory:"
+"#;
+        let err = Config::from_yaml_str(yaml).unwrap_err();
+        assert!(err.to_string().contains("ghost"), "err = {err:?}");
     }
 
     #[test]
