@@ -233,16 +233,17 @@ pub async fn execute_batch(
         normalised.push(validate_params(declaration, raw_map)?);
     }
 
+    let total = normalised.len();
     match pool {
         Pool::Postgres(pg) => {
             let mut tx = pg.begin().await.map_err(sql_err)?;
-            let mut all = Vec::with_capacity(normalised.len());
-            for pm in &normalised {
+            let mut all = Vec::with_capacity(total);
+            for (i, pm) in normalised.iter().enumerate() {
                 match run_pg(&mut *tx, &rewritten, &param_names, pm, declaration).await {
                     Ok(rows) => all.push(rows),
                     Err(e) => {
                         let _ = tx.rollback().await;
-                        return Err(e);
+                        return Err(generic_batch_failure(i, total, e));
                     }
                 }
             }
@@ -251,19 +252,40 @@ pub async fn execute_batch(
         }
         Pool::Sqlite(sq) => {
             let mut tx = sq.begin().await.map_err(sql_err)?;
-            let mut all = Vec::with_capacity(normalised.len());
-            for pm in &normalised {
+            let mut all = Vec::with_capacity(total);
+            for (i, pm) in normalised.iter().enumerate() {
                 match run_sqlite(&mut *tx, &rewritten, &param_names, pm).await {
                     Ok(rows) => all.push(rows),
                     Err(e) => {
                         let _ = tx.rollback().await;
-                        return Err(e);
+                        return Err(generic_batch_failure(i, total, e));
                     }
                 }
             }
             tx.commit().await.map_err(sql_err)?;
             Ok(all)
         }
+    }
+}
+
+/// R9: convert an in-batch statement failure into a caller-safe
+/// generic error. Emits the underlying detail at WARN so operators
+/// can still diagnose while the caller only sees position + size.
+fn generic_batch_failure(
+    zero_based_index: usize,
+    total: usize,
+    underlying: ResqlError,
+) -> ResqlError {
+    let index_one_based = zero_based_index + 1;
+    tracing::warn!(
+        resql.batch.index = index_one_based,
+        resql.batch.total = total,
+        underlying = %underlying,
+        "batch statement failed; rolled back"
+    );
+    ResqlError::BatchStatementFailed {
+        index: index_one_based,
+        total,
     }
 }
 
