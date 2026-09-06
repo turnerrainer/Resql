@@ -56,6 +56,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   masked-password URL so operators can still verify connection
   topology without exposing it on the wire. (R5)
 
+### Reliability (v1 pre-publication audit — h2ck.me)
+
+- **`server.request_timeout_seconds` is now enforced.** Previously the
+  config field existed but no middleware honoured it, so a caller
+  could send `SELECT pg_sleep(3600)` and pin a pool connection for
+  the full hour — with `max_connections: 10` (default) it took 10
+  such queries to lock every legitimate caller out for the pool's
+  `acquire_timeout_seconds`. Now:
+  - A `TimeoutLayer` (from `tower-http`) wraps every route and
+    returns **504 Gateway Timeout** when the deadline elapses.
+    Cancellation drops the future, releasing the pool connection.
+  - Every Postgres pool connection now runs
+    `SET statement_timeout = <request_timeout_seconds>` in its
+    `after_connect` hook, so a query whose future was already
+    cancelled still gets killed at the server side rather than
+    running to completion in the background.
+  - `request_timeout_seconds: 0` is now rejected at config validation
+    time. A zero value would silently disable the timeout and re-open
+    the pool-exhaustion attack lane. (R6, also folds in R7.)
+
 ## [0.1.2-alpha] - 2026-09-03
 
 Correctness release. Fixes issue #11 (declared `items.type` now drives array element validation and binding — empty typed arrays into native `text[]` columns work end-to-end) plus a batch of audit-cycle hardening the fix uncovered: silent-null decode bugs for `float8[]` / `bool[]` / `uuid[]` / `date[]` / `timestamptz[]` / `numeric[]` / `jsonb[]` columns, strict scalar `uuid` / `date` / `datetime` format validation, boot-time coerce checks for declared defaults + enum entries, and nested `items:` support for arrays-of-arrays. Every fix has an end-to-end integration test against a real Postgres column; the audit exposed and fixed several latent silent-data-loss bugs that hadn't been reported yet.

@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use axum::extract::{Path, Query, Request, State};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode};
@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use tower_http::cors::CorsLayer;
 use tower_http::limit::RequestBodyLimitLayer;
+use tower_http::timeout::TimeoutLayer;
 use tracing::Instrument;
 
 use crate::config::{Config, LoggingConfig};
@@ -39,6 +40,7 @@ pub struct AppState {
 pub fn router(state: AppState) -> Router {
     let cors = build_cors(&state.config.cors.allowed_origins);
     let body_limit = state.config.server.max_body_bytes;
+    let timeout = Duration::from_secs(state.config.server.request_timeout_seconds);
     let logging_for_layer = state.config.logging.clone();
 
     let mut router = Router::new()
@@ -56,6 +58,22 @@ pub fn router(state: AppState) -> Router {
     }
 
     router
+        // Cap wall-clock time per request. The layer aborts the inner
+        // future and returns 504 Gateway Timeout when the deadline
+        // elapses — pool connections get dropped back to the pool on
+        // cancellation, so a single slow query can no longer pin a
+        // slot indefinitely. Postgres's own `statement_timeout` (set
+        // in the connection hook — see `db::connect`) is the
+        // belt-and-braces backstop that kills the server-side query
+        // when the Rust future has already gone away.
+        //
+        // 504 (not 408) because "the upstream — the database — didn't
+        // respond in time" is the accurate semantic; 408 would imply
+        // the client itself was slow.
+        .layer(TimeoutLayer::with_status_code(
+            StatusCode::GATEWAY_TIMEOUT,
+            timeout,
+        ))
         .layer(RequestBodyLimitLayer::new(body_limit))
         .layer(middleware::from_fn(move |req, next| {
             let cfg = logging_for_layer.clone();
@@ -455,7 +473,15 @@ fn choose_datasource(
 /// datasources and loading the SQL directory.
 pub async fn init(config: Config) -> Result<AppState, ResqlError> {
     let index = crate::loader::load_dir(&config.sql_dir)?;
-    let registry = DatasourceRegistry::connect_all(&config.datasources).await?;
+    // Propagate the request timeout to every Postgres connection as
+    // its `statement_timeout` — so a query that outlives the HTTP
+    // middleware cancellation is still killed at the server side and
+    // the pool slot is returned. See `db::connect` for the SET call.
+    let registry = DatasourceRegistry::connect_all_with_timeout(
+        &config.datasources,
+        Some(config.server.request_timeout_seconds),
+    )
+    .await?;
     let spec = openapi::build_spec(&index, &config.openapi);
     Ok(AppState {
         config: Arc::new(config),

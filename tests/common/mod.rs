@@ -38,6 +38,7 @@ pub struct TestAppBuilder {
     allow_header: bool,
     max_body: usize,
     datasources_public: bool,
+    request_timeout_secs: u64,
 }
 
 impl TestAppBuilder {
@@ -53,6 +54,7 @@ impl TestAppBuilder {
             // Tests exercise the endpoint behaviour by default; the
             // production posture is off.
             datasources_public: true,
+            request_timeout_secs: 30,
         }
     }
 
@@ -60,6 +62,13 @@ impl TestAppBuilder {
     /// or 404 (false, matching the production default under R5).
     pub fn datasources_public(mut self, enabled: bool) -> Self {
         self.datasources_public = enabled;
+        self
+    }
+
+    /// Set the request-level timeout (`server.request_timeout_seconds`).
+    /// Used by the R6 regression test to reproduce the deadline.
+    pub fn request_timeout_secs(mut self, s: u64) -> Self {
+        self.request_timeout_secs = s;
         self
     }
 
@@ -206,7 +215,7 @@ impl TestAppBuilder {
             server: resql::config::ServerConfig {
                 bind: "127.0.0.1:0".into(),
                 max_body_bytes: self.max_body,
-                request_timeout_seconds: 30,
+                request_timeout_seconds: self.request_timeout_secs,
             },
             sql_dir: sql_root.clone(),
             project_datasource_map: project_map,
