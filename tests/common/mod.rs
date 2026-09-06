@@ -173,8 +173,7 @@ impl TestAppBuilder {
         let mut header_allowlist: std::collections::HashMap<String, Vec<String>> =
             std::collections::HashMap::new();
         if self.allow_header {
-            let mut all_ds: Vec<String> =
-                cfg_datasources.iter().map(|d| d.name.clone()).collect();
+            let mut all_ds: Vec<String> = cfg_datasources.iter().map(|d| d.name.clone()).collect();
             all_ds.sort();
             all_ds.dedup();
             let mut projects: std::collections::BTreeSet<String> =

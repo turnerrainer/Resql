@@ -449,10 +449,7 @@ mod tests {
     fn choose_datasource_defaults_to_project_name() {
         let cfg = Config::from_yaml_str("sql_dir: ./sql\n").unwrap();
         let headers = HeaderMap::new();
-        assert_eq!(
-            choose_datasource(&cfg, "crm", &headers).unwrap(),
-            "crm"
-        );
+        assert_eq!(choose_datasource(&cfg, "crm", &headers).unwrap(), "crm");
     }
 
     #[test]
@@ -469,10 +466,7 @@ datasources:
         let cfg = Config::from_yaml_str(yaml).unwrap();
         let mut headers = HeaderMap::new();
         headers.insert(DATASOURCE_HEADER, HeaderValue::from_static("other"));
-        assert_eq!(
-            choose_datasource(&cfg, "crm", &headers).unwrap(),
-            "other"
-        );
+        assert_eq!(choose_datasource(&cfg, "crm", &headers).unwrap(), "other");
     }
 
     #[test]
@@ -481,10 +475,7 @@ datasources:
             Config::from_yaml_str("sql_dir: ./sql\nallow_datasource_header: false\n").unwrap();
         let mut headers = HeaderMap::new();
         headers.insert(DATASOURCE_HEADER, HeaderValue::from_static("other"));
-        assert_eq!(
-            choose_datasource(&cfg, "crm", &headers).unwrap(),
-            "crm"
-        );
+        assert_eq!(choose_datasource(&cfg, "crm", &headers).unwrap(), "crm");
     }
 
     #[test]
@@ -540,7 +531,10 @@ datasources:
         let mut headers = HeaderMap::new();
         headers.insert(DATASOURCE_HEADER, HeaderValue::from_static("db2"));
         let err = choose_datasource(&cfg, "crm", &headers).unwrap_err();
-        assert!(matches!(err, ResqlError::ForbiddenDatasourceOverride { .. }));
+        assert!(matches!(
+            err,
+            ResqlError::ForbiddenDatasourceOverride { .. }
+        ));
     }
 
     #[test]

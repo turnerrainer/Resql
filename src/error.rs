@@ -76,7 +76,9 @@ impl ResqlError {
             ResqlError::BodyTooLarge => "PayloadTooLargeException",
             ResqlError::MalformedRequest(_) => "MalformedRequestException",
             ResqlError::Internal(_) => "InternalError",
-            ResqlError::ForbiddenDatasourceOverride { .. } => "ForbiddenDatasourceOverrideException",
+            ResqlError::ForbiddenDatasourceOverride { .. } => {
+                "ForbiddenDatasourceOverrideException"
+            }
         }
     }
 
