@@ -14,3 +14,9 @@
 # scrubbed from the tree going forward. History rewrite would be a
 # separate, coordinated operation.
 HANDOFF.md
+
+# Local drafts for downstream release announcements (Slack, mailing
+# list, GitHub Release notes body, etc.). The published version
+# should go through `gh release edit` or the target channel, not the
+# repo tree — these are working files only.
+announcement-v*.md
