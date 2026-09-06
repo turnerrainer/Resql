@@ -186,3 +186,55 @@ Open backlog:
 | Full change history | [`./CHANGELOG.md`](./CHANGELOG.md) |
 | Private security disclosure | [`./SECURITY.md`](./SECURITY.md) |
 | CI workflows | [`.github/workflows/`](./.github/workflows/) |
+
+---
+
+## h2ck.me security-audit pipeline
+
+**Added**: 2026-09-06. Describes the ongoing pre-publication security audit + fix + review flow with the `h2ckme` private GitHub org. If you land in this repo cold and see open `fix/*` PRs referencing the h2ck.me audit, start here.
+
+### What it is
+
+h2ck.me runs a versioned audit → fix → validate cycle against every Bürostack-fleet service before it goes public. Each round is a `vN/` folder in the corresponding private repo under [`github.com/h2ckme`](https://github.com/h2ckme):
+
+- `vN/AUDIT.md` — findings by severity, file:line pointers, attack scenarios.
+- `vN/FIX-KIT.md` — runnable attack sandbox, diff-shaped fix code, per-finding acceptance criteria, "break-the-fix" input catalogue.
+- `vN/PR-REVIEWS/<pr-number>-<head-sha7>.md` — one per PR reviewed (append-only across force-pushes).
+
+**Fleet-wide index** — [`h2ckme/security-fleet` → `REVIEW-INDEX.md`](https://github.com/h2ckme/security-fleet/blob/main/REVIEW-INDEX.md).
+
+### Where feedback lives
+
+Reviews are file-based inside the private h2ckme org — h2ck.me does not post GitHub PR comments. The loop:
+
+1. **Per-PR write-up** at [`h2ckme/Resql-on-Rust/v1/PR-REVIEWS/<pr#>-<sha7>.md`](https://github.com/h2ckme/Resql-on-Rust/tree/main/v1/PR-REVIEWS) — verdict (✅ / ⚠️ / ❌), acceptance-marker table, break-the-fix probes, nits for v2. Append-only across force-pushes (a new SHA writes a new file).
+2. **Round roll-up** at [`h2ckme/Resql-on-Rust/v1/feedback/RESPONSE-YYYY-MM-DD.md`](https://github.com/h2ckme/Resql-on-Rust/tree/main/v1/feedback) — closes a batch of verifications; links to each per-PR file. Open this first when h2ck.me signals "verification done."
+3. **Audit + fix-kit context**: [`h2ckme/Resql-on-Rust/v1/AUDIT.md`](https://github.com/h2ckme/Resql-on-Rust/blob/main/v1/AUDIT.md) + [`v1/FIX-KIT.md`](https://github.com/h2ckme/Resql-on-Rust/blob/main/v1/FIX-KIT.md).
+
+**h2ckme access**: private org; your GitHub account has read via org membership. Clone with `git clone git@github.com:h2ckme/Resql-on-Rust.git`.
+
+### Open v1 PRs on this repo
+
+| PR | Branch | Findings | h2ck.me verdict |
+|---|---|---|---|
+| [#13](https://github.com/turnerrainer/Resql/pull/13) | `fix/harden-routing-cors` | R1 datasource-header ACL, R2 CORS default-deny, R3 narrow methods+headers | ✅ pass |
+| [#14](https://github.com/turnerrainer/Resql/pull/14) | `fix/loader-symlinks` | R4 SQL loader symlink reject | ✅ pass |
+| [#15](https://github.com/turnerrainer/Resql/pull/15) | `fix/datasources-redact` | R5 `/datasources` 404-by-default + redact | ✅ pass |
+| [#16](https://github.com/turnerrainer/Resql/pull/16) | `fix/request-timeout` | R6 request timeout + R7 pool exhaustion (Postgres `statement_timeout` hook) | ✅ pass |
+| [#17](https://github.com/turnerrainer/Resql/pull/17) | `fix/batch-error-generic` | R9 batch endpoint generic error, no schema leak | ✅ pass |
+
+### Next action for a maintainer landing here
+
+1. **Open each of the 5 PRs above** in order (they're independent — merge order doesn't matter). Read the linked h2ckme write-up per PR before merging.
+2. Skim the acceptance table + break-the-fix probes + nits in the write-up.
+3. **Merge each PR** on your release cadence (all 5 auto-verdict ✅ pass; no blockers). Suggested order: `#14` (loader) → `#13` (routing+CORS) → `#15` (datasources) → `#16` (timeout) → `#17` (batch). After merging, bump `Cargo.toml` + `CHANGELOG.md` and tag.
+4. **Wait ~2 weeks**, then h2ck.me opens `v2/` as an adversarial re-audit of the merged tree.
+
+### If a review says ⚠️ or ❌
+
+- ⚠️ pass-with-note = merge is OK but a docs/operator item is worth doing. Named in the write-up's "Nits" section.
+- ❌ request-changes = don't merge; address on the same fix branch, push a new SHA. h2ck.me writes a fresh `<pr>-<new-sha7>.md` review — old file stays as audit trail.
+
+### h2ck.me does NOT touch this repo
+
+Explicit boundary: h2ck.me writes only to `h2ckme/*` (private org). It never pushes code, opens PRs, edits files, or posts comments in `turnerrainer/*`. All fixes come from you or a fixer of your choice, on a branch you push.
