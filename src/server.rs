@@ -494,10 +494,7 @@ mod tests {
         // scheme so the file path (which may include usernames or leak
         // deployment topology) is not disclosed.
         assert_eq!(redact_url("sqlite::memory:"), "sqlite:");
-        assert_eq!(
-            redact_url("sqlite:/var/lib/resql/audit.db"),
-            "sqlite:"
-        );
+        assert_eq!(redact_url("sqlite:/var/lib/resql/audit.db"), "sqlite:");
     }
 
     #[test]

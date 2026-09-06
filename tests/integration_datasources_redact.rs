@@ -32,7 +32,10 @@ async fn datasources_endpoint_omits_username_and_redacts_url() {
     // query — just the scheme portion.
     let jdbc = entry["jdbcUrl"].as_str().unwrap();
     assert!(jdbc.starts_with("sqlite"), "jdbc = {jdbc}");
-    assert!(!jdbc.contains("memory"), "jdbc must not leak SQLite path detail: {jdbc}");
+    assert!(
+        !jdbc.contains("memory"),
+        "jdbc must not leak SQLite path detail: {jdbc}"
+    );
     assert!(!jdbc.contains('@'), "jdbc must not carry userinfo: {jdbc}");
     // Password never present.
     assert!(entry.get("password").is_none());
