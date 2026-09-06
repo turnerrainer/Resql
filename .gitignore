@@ -8,3 +8,9 @@
 .idea/
 .vscode/
 *.iml
+
+# Internal operator handoff notes — never public. Do not commit.
+# The file exists in dev history up to 2026-09-06 and needs to be
+# scrubbed from the tree going forward. History rewrite would be a
+# separate, coordinated operation.
+HANDOFF.md
