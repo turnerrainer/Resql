@@ -32,6 +32,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `authorization`, `x-datasource`, `traceparent`). Previously all
   methods and all headers were echoed back on preflight, expanding
   the drive-by surface a malicious origin could exploit alongside R2. (R3)
+- **Loader now refuses symlinks in the SQL tree.** Every filesystem
+  entry inside `sql_dir` is inspected with `symlink_metadata`; any
+  symlink — file, directory, or broken — is skipped with a WARN log
+  line and never opened. As defence-in-depth, each opened file's
+  canonical path is asserted to still live under the canonical
+  `sql_dir`, so an entry whose *parent chain* contains a symlink is
+  also rejected. Previously an operator (or attacker) with write
+  access to the SQL directory could plant `sql/prod/GET/leak
+  -> /etc/passwd` and have Resql read the target as SQL. (R4)
 
 ## [0.1.2-alpha] - 2026-09-03
 

@@ -122,6 +122,18 @@ impl QueryIndex {
 ///
 /// Layout: `sql_dir/<project>/<GET|POST>/<path...>.sql`
 /// → endpoint `<METHOD> /<project>/<path.../filename-without-.sql>`
+///
+/// # Symlink policy
+///
+/// The loader never follows symlinks. Every filesystem entry inside
+/// `sql_dir` is inspected with `symlink_metadata`, and any symlink —
+/// whether pointing at a file, a directory, or nowhere — is skipped
+/// and logged at WARN. The realised path of every file the loader
+/// does open is canonicalised and checked to still live under the
+/// canonicalised `sql_dir`; anything that escapes is skipped. This
+/// defeats an operator with write access to a shared SQL directory
+/// (or a compromised container mount) planting `sql/prod/GET/leak ->
+/// /etc/passwd` and having it served as SQL.
 pub fn load_dir(sql_dir: &Path) -> Result<QueryIndex, ResqlError> {
     if !sql_dir.exists() {
         return Err(ResqlError::InvalidDirectory {
@@ -135,11 +147,25 @@ pub fn load_dir(sql_dir: &Path) -> Result<QueryIndex, ResqlError> {
             reason: "path is not a directory".into(),
         });
     }
+    // Canonicalise the root once so we can assert every resolved file
+    // path is still under it (defence-in-depth against a symlink that
+    // slipped past the walk-time check).
+    let canonical_root = sql_dir
+        .canonicalize()
+        .map_err(|e| ResqlError::InvalidDirectory {
+            path: sql_dir.to_path_buf(),
+            reason: format!("cannot canonicalise: {e}"),
+        })?;
 
     let mut index = QueryIndex::default();
     for project_entry in read_dir_sorted(sql_dir)? {
         let project_path = project_entry;
-        if !project_path.is_dir() {
+        // symlink_metadata() does NOT follow — symlinked project
+        // directories are refused up front.
+        let Some(meta) = symlink_metadata_or_skip(&project_path) else {
+            continue;
+        };
+        if !meta.is_dir() {
             continue;
         }
         let project_name = project_path
@@ -152,7 +178,10 @@ pub fn load_dir(sql_dir: &Path) -> Result<QueryIndex, ResqlError> {
             .to_string();
 
         for method_path in read_dir_sorted(&project_path)? {
-            if !method_path.is_dir() {
+            let Some(meta) = symlink_metadata_or_skip(&method_path) else {
+                continue;
+            };
+            if !meta.is_dir() {
                 continue;
             }
             let method_name = method_path
@@ -168,10 +197,36 @@ pub fn load_dir(sql_dir: &Path) -> Result<QueryIndex, ResqlError> {
                 method,
                 &method_path,
                 &method_path,
+                &canonical_root,
             )?;
         }
     }
     Ok(index)
+}
+
+/// Fetch the entry's own metadata (no symlink following). Returns
+/// `None` after logging at WARN when the entry is a symlink or when
+/// the metadata call itself fails — either way, the caller should
+/// skip the entry.
+fn symlink_metadata_or_skip(path: &Path) -> Option<std::fs::Metadata> {
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            tracing::warn!(
+                path = %path.display(),
+                "skipping symlink in SQL tree"
+            );
+            None
+        }
+        Ok(meta) => Some(meta),
+        Err(e) => {
+            tracing::warn!(
+                path = %path.display(),
+                error = %e,
+                "skipping entry: cannot read metadata"
+            );
+            None
+        }
+    }
 }
 
 fn walk_method_dir(
@@ -180,18 +235,46 @@ fn walk_method_dir(
     method: HttpMethod,
     method_root: &Path,
     current: &Path,
+    canonical_root: &Path,
 ) -> Result<(), ResqlError> {
     for entry in read_dir_sorted(current)? {
-        if entry.is_dir() {
-            walk_method_dir(index, project, method, method_root, &entry)?;
+        let Some(meta) = symlink_metadata_or_skip(&entry) else {
+            continue;
+        };
+        if meta.is_dir() {
+            walk_method_dir(index, project, method, method_root, &entry, canonical_root)?;
             continue;
         }
-        if !entry.is_file() {
+        if !meta.is_file() {
             continue;
         }
         let ext = entry.extension().and_then(|s| s.to_str()).unwrap_or("");
         if !ext.eq_ignore_ascii_case("sql") {
             continue;
+        }
+        // Defence-in-depth: even though `symlink_metadata` rejected an
+        // obvious symlink at this entry, the entry's *parent chain*
+        // could still contain something exotic on unusual filesystems.
+        // Canonicalise the file path and assert it still lives under
+        // the canonicalised SQL root before opening it.
+        match entry.canonicalize() {
+            Ok(resolved) if resolved.starts_with(canonical_root) => {}
+            Ok(resolved) => {
+                tracing::warn!(
+                    path = %entry.display(),
+                    resolved = %resolved.display(),
+                    "skipping SQL file: resolved path escapes sql_dir"
+                );
+                continue;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    path = %entry.display(),
+                    error = %e,
+                    "skipping SQL file: cannot canonicalise"
+                );
+                continue;
+            }
         }
         let rel = entry
             .strip_prefix(method_root)
@@ -413,6 +496,60 @@ mod tests {
         write_declared(td.path(), "crm/GET/a/b/c/deep.sql", "SELECT 1");
         let idx = load_dir(td.path()).unwrap();
         assert!(idx.get(HttpMethod::Get, "crm", "a/b/c/deep").is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_pointing_at_sql_file_outside_root_is_skipped() {
+        // R4: attacker with write access to the SQL directory plants a
+        // symlink to /etc/passwd. Loader must skip it, not read it.
+        use std::os::unix::fs::symlink;
+        let td = TempDir::new().unwrap();
+        let sql_root = td.path();
+        fs::create_dir_all(sql_root.join("prod/GET")).unwrap();
+        // Write a real sibling so the tree isn't empty.
+        write_declared(sql_root, "prod/GET/hello.sql", "SELECT 1");
+        // Plant the symlink.
+        symlink("/etc/passwd", sql_root.join("prod/GET/leak.sql")).unwrap();
+        let idx = load_dir(sql_root).unwrap();
+        // Only `hello` survives; `leak` is skipped.
+        assert!(idx.get(HttpMethod::Get, "prod", "hello").is_some());
+        assert!(idx.get(HttpMethod::Get, "prod", "leak").is_none());
+        assert_eq!(idx.len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_to_directory_inside_root_is_skipped() {
+        // A symlinked *directory* (even one pointing at something legit
+        // inside the same root) must not be recursed into — otherwise a
+        // symlink could double-count real files or lead to a cycle.
+        use std::os::unix::fs::symlink;
+        let td = TempDir::new().unwrap();
+        let sql_root = td.path();
+        write_declared(sql_root, "prod/GET/hello.sql", "SELECT 1");
+        // Symlink `prod/GET/mirror` → `prod/GET` itself.
+        symlink(sql_root.join("prod/GET"), sql_root.join("prod/GET/mirror")).unwrap();
+        let idx = load_dir(sql_root).unwrap();
+        // Still just `hello`; the mirror wasn't recursed into.
+        assert_eq!(idx.len(), 1);
+        assert!(idx.get(HttpMethod::Get, "prod", "hello").is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn broken_symlink_is_silently_skipped() {
+        use std::os::unix::fs::symlink;
+        let td = TempDir::new().unwrap();
+        let sql_root = td.path();
+        fs::create_dir_all(sql_root.join("prod/GET")).unwrap();
+        symlink(
+            "/nonexistent/definitely/missing.sql",
+            sql_root.join("prod/GET/broken.sql"),
+        )
+        .unwrap();
+        let idx = load_dir(sql_root).unwrap();
+        assert!(idx.is_empty());
     }
 
     #[test]
