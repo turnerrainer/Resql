@@ -37,6 +37,7 @@ pub struct TestAppBuilder {
     project_map: Vec<(String, String)>,
     allow_header: bool,
     max_body: usize,
+    datasources_public: bool,
 }
 
 impl TestAppBuilder {
@@ -49,7 +50,17 @@ impl TestAppBuilder {
             project_map: Vec::new(),
             allow_header: true,
             max_body: 1_048_576,
+            // Tests exercise the endpoint behaviour by default; the
+            // production posture is off.
+            datasources_public: true,
         }
+    }
+
+    /// Toggle whether the `/datasources` endpoint returns data (true)
+    /// or 404 (false, matching the production default under R5).
+    pub fn datasources_public(mut self, enabled: bool) -> Self {
+        self.datasources_public = enabled;
+        self
     }
 
     /// Add a Postgres-backed datasource by URL. Coexists with any
@@ -206,6 +217,9 @@ impl TestAppBuilder {
             cors: resql::config::CorsConfig::default(),
             logging: resql::config::LoggingConfig::default(),
             openapi: resql::config::OpenApiConfig::default(),
+            admin: resql::config::AdminConfig {
+                datasources_public: self.datasources_public,
+            },
             compat_diagnostics: Vec::new(),
         };
 
