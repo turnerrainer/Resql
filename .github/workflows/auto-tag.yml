@@ -1,0 +1,73 @@
+name: auto-tag
+
+# On every push to dev (i.e. on every merged PR), read the version
+# from Cargo.toml. If no matching v<version> tag exists, create it
+# and dispatch publish.yml. This means a release PR = a merge PR
+# that bumps Cargo.toml version; no manual `git tag` needed.
+#
+# Why we dispatch publish.yml instead of letting the tag-push
+# trigger it: pushes authenticated with GITHUB_TOKEN do NOT fire
+# further workflow_run/push-tag triggers (GitHub's recursion guard).
+# So we explicitly workflow_dispatch publish.yml with the tag as an
+# input — publish.yml supports that path already.
+
+on:
+  push:
+    branches: [dev, main]
+
+concurrency:
+  group: auto-tag-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write   # create + push git tag
+  actions: write    # workflow_dispatch publish.yml
+
+jobs:
+  tag-and-publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0   # need full history for tag lookups
+
+      - name: Read version from Cargo.toml
+        id: version
+        run: |
+          VERSION=$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"(.+)".*/\1/')
+          if [ -z "$VERSION" ]; then
+            echo "could not read version from Cargo.toml" >&2
+            exit 1
+          fi
+          TAG="v${VERSION}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Check whether tag already exists
+        id: check
+        run: |
+          TAG='${{ steps.version.outputs.tag }}'
+          if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
+            echo "already-tagged=true" >> "$GITHUB_OUTPUT"
+            echo "Tag ${TAG} already exists — nothing to do."
+          else
+            echo "already-tagged=false" >> "$GITHUB_OUTPUT"
+            echo "Tag ${TAG} does not exist yet — will create."
+          fi
+
+      - name: Create + push annotated tag
+        if: steps.check.outputs.already-tagged == 'false'
+        run: |
+          TAG='${{ steps.version.outputs.tag }}'
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "${TAG}" -m "Release ${TAG}"
+          git push origin "${TAG}"
+
+      - name: Dispatch publish workflow
+        if: steps.check.outputs.already-tagged == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG='${{ steps.version.outputs.tag }}'
+          gh workflow run publish.yml -f tag="${TAG}"
+          echo "Dispatched publish.yml with tag=${TAG}"
