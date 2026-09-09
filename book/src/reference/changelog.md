@@ -6,6 +6,168 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0-alpha] - 2026-09-10
+
+**Minor bump because the error-response wire shape changed.** Configs
+are unaffected; callers that read `body.error` / `body.message` must
+switch to the `X-Resql-Error-Code` / `X-Resql-Error-Message` response
+headers. HTTP status and exception-class identifiers are unchanged.
+See [`CLAUDE.md`](https://github.com/turnerrainer/Resql/blob/dev/CLAUDE.md#post-020-alpha-breaking-change-breaking-for-callers-not-configs)
+for the operator-facing short list and DIV-022 in `DIVERGENCES.md`
+for the rationale.
+
+### Changed (BREAKING)
+
+- **Error responses on query endpoints now use an empty-array body +
+  headers envelope.** Body is always `[]` on any non-2xx from
+  `/:project/:tail` (or the batch shape); the same information — the
+  Java-canonical exception class name and the human-readable message —
+  moves to the response headers `X-Resql-Error-Code` and
+  `X-Resql-Error-Message`. HTTP status and the exception-class
+  identifiers are unchanged; the message header is sanitised to
+  printable ASCII (CR/LF stripped, non-printable → `?`) and the full
+  un-sanitised text stays in the server log for the request's trace
+  id. Fixes a whole class of silent fail-open bugs in downstream DSLs
+  that branched on `body.length > 0` — with the old object body,
+  `.length` was `undefined` on error, which many DSL evaluators coerce
+  to `false`, silently routing DB failures into a "not-found" branch.
+  Callers that used to read `body["error"]` / `body["message"]` must
+  now read the two response headers. Issue #25. See DIV-022 in
+  `DIVERGENCES.md`.
+
+### Fixed
+
+- **`password_env` no longer silently defeated when the datasource URL
+  already carries a `user:pw@` component.** Config-supplied credentials
+  (from `password_env` or the Java-compat `password` field) now override
+  any userinfo embedded in the URL, and a WARN log line names the
+  collision so an operator who rotated the URL's password without
+  clearing `password_env` notices that the env variable is now the
+  source of truth. Previous behaviour returned the URL unchanged,
+  which turned `password_env` into a decoration and let stale
+  URL-embedded passwords silently take effect. Issue #27.
+- **Postgres user-defined `ENUM` columns (and enum arrays) are now
+  auto-coerced to their text label on read.** Previously a bare
+  `SELECT status FROM t` where `status` is a project-defined enum
+  returned JSON `null` — sqlx's built-in `String` decoder isn't
+  compatible with the enum's dynamic OID, so every branch of the row
+  materialiser fell through. Callers had to remember `::text` on every
+  enum SELECT or lose data. The row materialiser now inspects
+  `PgTypeInfo::kind()` and decodes `PgTypeKind::Enum` and
+  `PgTypeKind::Array(Enum)` columns via their raw wire form, since
+  Postgres transmits enum values as UTF-8 labels. Issue #26.
+
+## [0.2.0-alpha] - 2026-09-06
+
+Security release. Closes the [h2ck.me](https://github.com/h2ckme) v1 pre-publication audit (findings R1–R7 + R9, all ✅). **MINOR bump because config defaults were flipped in ways that will make some existing `0.1.x-alpha` configs behave differently or refuse to boot.** See the [README "Upgrading to 0.2.0-alpha"](https://github.com/turnerrainer/Resql/blob/dev/README.md#upgrading-to-020-alpha) table for the operator-facing short list and [`CLAUDE.md`](https://github.com/turnerrainer/Resql/blob/dev/CLAUDE.md#v1-security-audit-changes-breaking-for-existing-configs) for grep recipes + a paste-in Python auditor.
+
+### Security (v1 pre-publication audit — h2ck.me)
+
+- **`allow_datasource_header` now defaults to `false`, and every override
+  is gated by a per-project allowlist.** The `X-Datasource` header
+  previously let any caller route a request against a different
+  registered datasource, opening a lateral-move lane inside the service
+  trust boundary. New config field `datasource_header_allowlist:
+  { <project>: [<allowed datasource names>] }` — an override that names
+  a (project, datasource) pair not in this map now returns `403
+  ForbiddenDatasourceOverrideException`. The rejection message names
+  only the offender, not the set of registered datasources, so
+  attackers cannot enumerate the registry by sending guesses.
+  Operators who need header routing must set
+  `allow_datasource_header: true` **and** populate the allowlist. (R1)
+- **CORS defaults to closed.** `cors.allowed_origins` now defaults to
+  `""` — the CORS layer is not attached at all, so no
+  `Access-Control-Allow-Origin` header is emitted and browsers refuse
+  cross-origin reads. Operators who need cross-origin must set it
+  explicitly. (R2)
+- **CORS methods and headers narrowed when configured.** When
+  `cors.allowed_origins` is set, the layer now advertises only `GET`
+  and `POST` (the methods the router actually serves) and only the
+  request headers Resql actually reads (`content-type`,
+  `authorization`, `x-datasource`, `traceparent`). Previously all
+  methods and all headers were echoed back on preflight, expanding
+  the drive-by surface a malicious origin could exploit alongside R2. (R3)
+- **Loader now refuses symlinks in the SQL tree.** Every filesystem
+  entry inside `sql_dir` is inspected with `symlink_metadata`; any
+  symlink — file, directory, or broken — is skipped with a WARN log
+  line and never opened. As defence-in-depth, each opened file's
+  canonical path is asserted to still live under the canonical
+  `sql_dir`, so an entry whose *parent chain* contains a symlink is
+  also rejected. Previously an operator (or attacker) with write
+  access to the SQL directory could plant `sql/prod/GET/leak
+  -> /etc/passwd` and have Resql read the target as SQL. (R4)
+- **`/datasources` now returns 404 by default; when enabled, output is
+  redacted.** New config gate `admin.datasources_public: bool`
+  (defaults to `false`) hides the endpoint entirely — unauth callers
+  can't distinguish Resql from a service that never mounted it.
+  Operators who need the endpoint set the flag to `true`, but even
+  then the response is hardened:
+  - `jdbcUrl` is redacted to `<scheme>://<host>[:port]` — path,
+    query, and userinfo are all stripped. SQLite URLs redact down to
+    just `sqlite:` so file paths don't leak deployment topology.
+  - `username` is always the empty string. The real value stays in
+    the operator's startup logs only.
+  Startup emits one `datasource connected` INFO line per pool with the
+  masked-password URL so operators can still verify connection
+  topology without exposing it on the wire. (R5)
+- **Batch endpoint errors no longer leak underlying SQL detail.**
+  Previously a failing `POST /:project/:path/batch` returned the raw
+  driver error text — which for Postgres includes constraint,
+  column, and table names, and for SQLite includes messages like
+  `UNIQUE constraint failed: t.login`. Attackers could iterate a
+  batch to probe schema. Now the caller sees
+  `Batch failed at statement N of M, rolled back` (with the failing
+  position and total, but no driver detail). The full underlying
+  error is logged at WARN so operators can still diagnose. HTTP
+  status and `error` field are unchanged (`400`,
+  `BadSqlGrammarException`) so existing callers that only branch on
+  status still work. (R9)
+
+### Reliability (v1 pre-publication audit — h2ck.me)
+
+- **`server.request_timeout_seconds` is now enforced.** Previously the
+  config field existed but no middleware honoured it, so a caller
+  could send `SELECT pg_sleep(3600)` and pin a pool connection for
+  the full hour — with `max_connections: 10` (default) it took 10
+  such queries to lock every legitimate caller out for the pool's
+  `acquire_timeout_seconds`. Now:
+  - A `TimeoutLayer` (from `tower-http`) wraps every route and
+    returns **504 Gateway Timeout** when the deadline elapses.
+    Cancellation drops the future, releasing the pool connection.
+  - Every Postgres pool connection now runs
+    `SET statement_timeout = <request_timeout_seconds>` in its
+    `after_connect` hook, so a query whose future was already
+    cancelled still gets killed at the server side rather than
+    running to completion in the background.
+  - `request_timeout_seconds: 0` is now rejected at config validation
+    time. A zero value would silently disable the timeout and re-open
+    the pool-exhaustion attack lane. (R6, also folds in R7.)
+
+## [0.1.2-alpha] - 2026-09-03
+
+Correctness release. Fixes issue #11 (declared `items.type` now drives array element validation and binding — empty typed arrays into native `text[]` columns work end-to-end) plus a batch of audit-cycle hardening the fix uncovered: silent-null decode bugs for `float8[]` / `bool[]` / `uuid[]` / `date[]` / `timestamptz[]` / `numeric[]` / `jsonb[]` columns, strict scalar `uuid` / `date` / `datetime` format validation, boot-time coerce checks for declared defaults + enum entries, and nested `items:` support for arrays-of-arrays. Every fix has an end-to-end integration test against a real Postgres column; the audit exposed and fixed several latent silent-data-loss bugs that hadn't been reported yet.
+
+Also verifies issue #10 with a regression test hammering the reporter's exact SQL shape across mixed input flavours on a pinned single connection — passes on the current codebase, so the underlying fix already shipped in [#9](https://github.com/turnerrainer/Resql/pull/9) (0.1.1-alpha). Callers still seeing that flake should upgrade to ≥ 0.1.1-alpha.
+
+### Fixed
+- **Empty typed arrays (`{"xs": []}` with `items: {type: string}` declared) could not be inserted into a native `text[]` column.** `bind_pg_array` used only the runtime JSON heuristic (`detect_pg_array_kind`) which gave up on empty and all-null arrays, falling back to a JSONB bind that Postgres refused for a `text[]` target. Fixed by teaching the bind path to consult the declared `items.type` first: empty / all-null arrays now bind as the correct native array (`text[]`, `int8[]`, `float8[]`, `bool[]`, `uuid[]`, `date[]`, `timestamptz[]`) instead of JSONB. The runtime heuristic remains as the fallback for legacy declarations with no `items:` block. ([#11](https://github.com/turnerrainer/Resql/issues/11))
+- **`float8[]` and `bool[]` columns silently decoded as JSON `null` instead of their value.** `pg_column_value` only had branches for text-family and integer-width array types; every other array flavour fell through the `ty_upper.ends_with("[]")` catch-all, tried a `Vec<i64>` decode that failed, then landed in the last-resort text probes (which also fail on non-text arrays) and came back as `null`. Fixed by adding decode branches for `_FLOAT4` / `_FLOAT8` / `_BOOL` ahead of the catch-all. Latent silent-data-loss bug — the fix for issue #11 exposed it via new end-to-end tests. Related: also added decode branches for `_UUID`, `_DATE`, `_TIMESTAMP`, `_TIMESTAMPTZ`, and `_TIME` arrays (same failure mode, different types).
+- **`numeric[]`, `json[]`, and `jsonb[]` columns silently decoded as JSON `null`.** Same silent-loss path as the `float8[]` / `bool[]` bug — no decode branch, fell through the int8[] catch-all, came back as null. Fixed: NUMERIC[] elements stringify each (precision preservation, matches scalar NUMERIC treatment); JSON[]/JSONB[] elements unwrap each `sqlx::types::Json` wrapper so the response holds the actual JSON value at each slot rather than a stringified copy. `_JSONB` decode ordering matters — `starts_with("_JSON")` also matches `_JSONB`, so the more-specific branch runs first.
+
+### Added
+- **Per-element type enforcement for array parameters with declared `items.type`.** Wrong-typed elements now reject at the request boundary with `xs[idx]: expected <type>, got <actual>` instead of being silently coerced to `SQL NULL` or bound into a heuristic-picked wire type that mismatches the target column. Element-level coercion runs the same coerce rules as the scalar path, so string-encoded numbers still pass for `items: {type: integer}` (mirrors GET query-string arrival). ([#11](https://github.com/turnerrainer/Resql/issues/11))
+- **Native binding for `uuid[]`, `date[]`, and `timestamptz[]` typed arrays.** Declaring `items: {type: uuid|date|datetime}` now binds the matching native Postgres array type — callers no longer need `::uuid[]` / `::date[]` / `::timestamptz[]` casts in the SQL. Every element is format-validated up front (`uuid::Uuid::parse_str`, `NaiveDate::parse_from_str`, RFC 3339 + naive ISO 8601 fallbacks for datetime), so bad literals surface as 400 responses naming the failing element instead of a cryptic bind-time or Postgres-side error. `datetime` elements are UTC-anchored (matches how `pg_column_value` renders `TIMESTAMPTZ` back).
+- **Recursive per-element validation for nested typed arrays.** `ItemType` now carries its own optional `items:` block so a declaration like `items: {type: array, items: {type: integer}}` validates grand-child elements — a mistyped element in `[[1, "two"]]` surfaces as `xs[0][1]: expected integer, got string`. The wire binding for nested arrays stays JSONB (Postgres arrays are physically flat, no native "array of array" type), but the validation path is now recursive to arbitrary depth. OpenAPI emission likewise nests `items` schemas to match.
+- **Boot-time rejection of `items:` on non-array parameter types.** `type: string, items: {type: integer}` is nonsensical and was previously silently ignored at runtime; now fails at load with `param 'x': 'items' is only valid on 'type: array'`.
+- **Boot-time coerce validation for declared `default:` values.** Every `default:` now runs through the same coerce pipeline the runtime uses (`coerce_to` + per-element `coerce_element`), so a misdeclared default (`default: "not-a-number"` on `type: integer`, or `default: [1, 2]` on `items: {type: string}`) fails at load instead of silently corrupting the request path when a caller happens to omit the param and trigger the default fallback.
+- **Strict format validation for scalar `uuid` / `date` / `datetime` params.** Bad literals now surface at the request boundary as `400 InvalidParameterTypeException` naming the failing param, instead of continuing to Postgres and coming back as a `BadSqlGrammarException` from the server-side cast. Uses the same `validate_semantic_format` helper the array-element path uses, so scalar and array behaviour are unified. **Wire binding is unchanged** — scalar semantic types still bind as text (Postgres implicit-casts on assignment), so no OIDs shift and existing SQL that relies on the text-binding shape (e.g. `WHERE id::text = :id`) keeps working. Well-typed callers see no change; only clients sending malformed literals are affected, and they get a clearer error sooner.
+- **Boot-time semantic-format validation for `enum:` entries.** `declaration::validate_enum_shapes` asserts the type *family* of each enum entry, which for `type: uuid|date|datetime` reduces to "is a string" — it can't distinguish a valid UUID from a garbage string. `type: uuid, enum: [..., "not-a-uuid"]` therefore loaded fine but shipped a dead entry no valid request could ever match (the runtime format check would reject the caller's payload before the enum lookup). New boot pass now format-validates each enum entry so declaration authors see the mistake at load rather than never.
+- Regression tests exercising the reporter's exact `LIMIT COALESCE(:limit::int, ...) OFFSET COALESCE(:offset::int, ...)` shape with mixed input flavours (default fallback / string-coerced / native numeric / null) across sequential calls on a pinned connection, plus a 40-iteration stress variant. All pass on the current codebase — the underlying cache-stable-OID fix landed in [#9](https://github.com/turnerrainer/Resql/pull/9), so anyone still seeing the `invalid byte sequence for encoding "UTF8": 0x80` flake from [#10](https://github.com/turnerrainer/Resql/issues/10) should upgrade to ≥ 0.1.1-alpha. ([#10](https://github.com/turnerrainer/Resql/issues/10))
+
+### Changed (behaviour tightening)
+- Callers who were previously sending array payloads that violated a declared `items.type` (e.g. numeric elements against `items: {type: string}`) will now receive a `400 InvalidParameterTypeException` instead of the previous heuristic-picked native-array bind (which typically failed later with a Postgres type-mismatch error, or silently succeeded with the wrong element type). The declaration is now the strict contract; per-element mismatches are rejected at the request boundary. **No callers who were sending well-typed payloads are affected.**
+- Callers sending malformed `uuid` / `date` / `datetime` scalar literals against a param typed accordingly will now receive `400 InvalidParameterTypeException` at the request boundary instead of a Postgres-side `BadSqlGrammarException`. Accepted formats: `uuid` — anything `uuid::Uuid::parse_str` accepts (hyphenated / unhyphenated / braced hex); `date` — strict `YYYY-MM-DD`; `datetime` — RFC 3339 with any offset (normalised to UTC), or naive ISO 8601 (`YYYY-MM-DD[T| ]HH:MM:SS[.f]`) treated as UTC. Callers previously relying on Postgres's more permissive date-string parser (e.g. `'July 1, 2026'`, `'20260701'`) will need to send strict ISO 8601 instead. **Well-formed literals see no change.**
+
 ## [0.1.1-alpha] - 2026-08-27
 
 Bug-fix release. Four Postgres correctness fixes that were silently returning `null` or corrupting the connection in the previous alpha. Also: **versioning scheme shift** — from now on the alpha series increments PATCH per release (`0.1.1-alpha`, `0.1.2-alpha`, …) instead of an alpha counter under a single target version (`0.1.0-alpha.N`). RC series will begin at `1.0.0-rc.1`; there will be no stable `0.1.0` release.
@@ -127,7 +289,10 @@ Spring Boot service. Interface-compatible with the original for the SQL-file-to-
 - Container image signed with cosign keyless via GHA OIDC.
 - Trivy HIGH/CRITICAL scan gates image signing.
 
-[Unreleased]: https://github.com/turnerrainer/Resql/compare/v0.1.1-alpha...HEAD
+[Unreleased]: https://github.com/turnerrainer/Resql/compare/v0.3.0-alpha...HEAD
+[0.3.0-alpha]: https://github.com/turnerrainer/Resql/releases/tag/v0.3.0-alpha
+[0.2.0-alpha]: https://github.com/turnerrainer/Resql/releases/tag/v0.2.0-alpha
+[0.1.2-alpha]: https://github.com/turnerrainer/Resql/releases/tag/v0.1.2-alpha
 [0.1.1-alpha]: https://github.com/turnerrainer/Resql/releases/tag/v0.1.1-alpha
 [0.1.0-alpha.4]: https://github.com/turnerrainer/Resql/releases/tag/v0.1.0-alpha.4
 [0.1.0-alpha.3]: https://github.com/turnerrainer/Resql/releases/tag/v0.1.0-alpha.3

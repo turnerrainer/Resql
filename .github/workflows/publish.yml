@@ -16,7 +16,7 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  contents: read
+  contents: write   # create GitHub Release for the tag
   packages: write
   id-token: write   # cosign keyless via GHA OIDC
 
@@ -150,3 +150,72 @@ jobs:
             [ -z "$ref" ] && continue
             cosign sign --yes "${ref}@${{ steps.build.outputs.digest }}"
           done < /tmp/tags.txt
+
+      - name: Extract release notes from CHANGELOG.md
+        id: notes
+        run: |
+          set -euo pipefail
+          TAG='${{ steps.tag.outputs.tag }}'
+          VERSION="${TAG#v}"
+          # Slice the section header for [<version>] up to (but not
+          # including) the next `## ` heading. Header may or may not
+          # carry a trailing " - <date>", so anchor on the [version]
+          # form only.
+          BODY_FILE=/tmp/release-notes.md
+          awk -v ver="$VERSION" '
+            $0 ~ "^## \\[" ver "\\]" { grabbing=1; next }
+            grabbing && /^## / { grabbing=0 }
+            grabbing { print }
+          ' CHANGELOG.md > "$BODY_FILE"
+          if [ ! -s "$BODY_FILE" ]; then
+            echo "no CHANGELOG.md section found for [${VERSION}] — falling back to auto-generated notes" >&2
+            echo "See CHANGELOG.md for full details." > "$BODY_FILE"
+            echo "auto-generate=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "auto-generate=false" >> "$GITHUB_OUTPUT"
+          fi
+          # Append pointers to the published artefacts so the Release
+          # page is self-contained.
+          {
+            echo ""
+            echo "---"
+            echo ""
+            echo "**Container images** (multi-arch amd64+arm64, cosign-signed keyless via GHA OIDC):"
+            while IFS= read -r ref; do
+              [ -z "$ref" ] && continue
+              echo "- \`${ref}\`"
+            done < /tmp/tags.txt
+            echo ""
+            echo "**Image digest**: \`${{ steps.build.outputs.digest }}\`"
+          } >> "$BODY_FILE"
+          echo "body-file=${BODY_FILE}" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG='${{ steps.tag.outputs.tag }}'
+          # Pre-release semver (v0.3.0-alpha, v0.3.0-rc.1, etc.) is
+          # marked as a GitHub prerelease so the "Latest release"
+          # badge only advances on stable tags.
+          PRERELEASE_FLAG=""
+          if [[ "$TAG" == *-* ]]; then
+            PRERELEASE_FLAG="--prerelease"
+          fi
+          # Idempotent: `gh release view` returns non-zero if the
+          # release doesn't exist yet. On re-runs (workflow_dispatch),
+          # skip creation and let operators edit the body manually.
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "GitHub Release ${TAG} already exists — leaving it alone."
+            exit 0
+          fi
+          EXTRA=()
+          if [ "${{ steps.notes.outputs.auto-generate }}" = "true" ]; then
+            EXTRA+=(--generate-notes)
+          fi
+          gh release create "$TAG" \
+            --title "$TAG" \
+            --notes-file "${{ steps.notes.outputs.body-file }}" \
+            $PRERELEASE_FLAG \
+            "${EXTRA[@]}"

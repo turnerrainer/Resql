@@ -6,6 +6,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0-alpha] - 2026-09-10
+
+**Minor bump because the error-response wire shape changed.** Configs
+are unaffected; callers that read `body.error` / `body.message` must
+switch to the `X-Resql-Error-Code` / `X-Resql-Error-Message` response
+headers. HTTP status and exception-class identifiers are unchanged.
+See [`CLAUDE.md`](https://github.com/turnerrainer/Resql/blob/dev/CLAUDE.md#post-020-alpha-breaking-change-breaking-for-callers-not-configs)
+for the operator-facing short list and DIV-022 in `DIVERGENCES.md`
+for the rationale.
+
 ### Changed (BREAKING)
 
 - **Error responses on query endpoints now use an empty-array body +
@@ -279,7 +289,8 @@ Spring Boot service. Interface-compatible with the original for the SQL-file-to-
 - Container image signed with cosign keyless via GHA OIDC.
 - Trivy HIGH/CRITICAL scan gates image signing.
 
-[Unreleased]: https://github.com/turnerrainer/Resql/compare/v0.2.0-alpha...HEAD
+[Unreleased]: https://github.com/turnerrainer/Resql/compare/v0.3.0-alpha...HEAD
+[0.3.0-alpha]: https://github.com/turnerrainer/Resql/releases/tag/v0.3.0-alpha
 [0.2.0-alpha]: https://github.com/turnerrainer/Resql/releases/tag/v0.2.0-alpha
 [0.1.2-alpha]: https://github.com/turnerrainer/Resql/releases/tag/v0.1.2-alpha
 [0.1.1-alpha]: https://github.com/turnerrainer/Resql/releases/tag/v0.1.1-alpha
