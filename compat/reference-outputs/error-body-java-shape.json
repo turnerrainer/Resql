@@ -1,5 +1,0 @@
-{
-  "_comment": "Structural reference for ANY 400 response from Java Resql. `error` = simple class name of the exception thrown. `message` = exception message string, or 'Internal error' when null.",
-  "error": "ResqlRuntimeException",
-  "message": "Saved query '/foo/bar' does not exist"
-}

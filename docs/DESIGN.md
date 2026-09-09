@@ -38,7 +38,13 @@ in one YAML file. There is no controller code to write.
 Response shape (success): `[{...row...}, ...]` — always a JSON array,
 even for single-row results and DDL (`[]`).
 
-Response shape (error): `{"error": "<ClassName>", "message": "..."}`.
+Response shape (error): body is always the empty JSON array `[]`; the
+error envelope moves to the response headers `X-Resql-Error-Code` (the
+Java-canonical exception class name) and `X-Resql-Error-Message` (a
+human-readable message, sanitised to printable ASCII). This makes the
+success and error body shapes symmetrical so a naive downstream check
+like `body.length > 0` cannot silently fail-open into "empty result"
+when the query errored. See issue #25 and DIV-022 in `DIVERGENCES.md`.
 
 ### 3.2 Path → File resolution
 

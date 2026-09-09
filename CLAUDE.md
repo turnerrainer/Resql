@@ -113,6 +113,89 @@ are unchanged — callers that only branch on status are unaffected.
 
 - **Only affects clients that regex the message body** for constraint / column / table names. Those clients need to switch to querying the target schema directly or reading the operator log (WARN entry contains the raw underlying error with `resql.batch.index` + `resql.batch.total` fields).
 
+## Post-0.2.0-alpha breaking change (BREAKING for callers, not configs)
+
+Landing in the next minor bump (`0.3.0-alpha`), tracked by issue #25.
+Unlike the v1 audit items above, this one is a **wire-shape** change
+— configs are unaffected; **callers that read the error response body
+break**. Everything semantically load-bearing (HTTP status codes,
+exception-class identifiers) is preserved; only the transport for the
+error detail moved from body to headers.
+
+### 8. Error envelope moved from response body to response headers (issue #25)
+
+The runtime cause of a class of silent fail-open bugs in downstream
+Ruuter DSLs. The naive pattern:
+
+```yaml
+- condition: ${resql_res.response.body.length > 0}
+  next: found
+next: not_found
+```
+
+used to route a DB error into the `not_found` branch because the old
+error body `{"error":"…","message":"…"}` is an object, `.length` is
+`undefined`, and `undefined > 0` is `false`. Consequences ranged from
+a wrong 404 to a DoS-amplifying fall-through in gateway-shaped
+systems.
+
+- **Old (`≤ 0.2.0-alpha`)**:
+  ```
+  HTTP/1.1 400 Bad Request
+  Content-Type: application/json
+
+  {"error":"BadSqlGrammarException","message":"…"}
+  ```
+- **New (`0.3.0-alpha`)**:
+  ```
+  HTTP/1.1 400 Bad Request
+  Content-Type: application/json
+  X-Resql-Error-Code: BadSqlGrammarException
+  X-Resql-Error-Message: … (printable-ASCII sanitised; CR/LF stripped, non-printable → `?`)
+
+  []
+  ```
+
+HTTP status and the exception-class identifiers themselves are
+**unchanged**. Full un-sanitised message text stays in the server log
+for the request's `trace_id`.
+
+- **Grep to find affected callers** — hunt for reads of the old body
+  fields anywhere downstream:
+  ```bash
+  # In Ruuter DSL / any consumer code:
+  grep -rn 'body\.error\|body\["error"\]\|body\.message\|body\["message"\]' .
+  # curl / http-shell scripts:
+  grep -rn 'jq .error\|jq -r .message' .
+  ```
+- **Fix** — read the two response headers instead:
+  ```yaml
+  # Ruuter DSL:
+  - assign:
+      error_code:    ${resql_res.response.headers["x-resql-error-code"]}
+      error_message: ${resql_res.response.headers["x-resql-error-message"]}
+  ```
+  ```bash
+  # curl:
+  code=$(curl -sS -D - -o /dev/null "$url" | awk 'BEGIN{IGNORECASE=1} /^x-resql-error-code:/ {print $2}' | tr -d '\r')
+  ```
+- **Safest migration order for DSL configs**:
+  1. Ship the DSL update that reads from the header (works on both
+     `≤ 0.2.0-alpha` — header is missing so var is empty — and `≥ 0.3.0-alpha`).
+  2. Then bump Resql to `0.3.0-alpha`. Old body reads on the DSL side
+     silently return "no rows" *once*, but by step 1 you've already
+     migrated to the header path.
+- **Callers who only branch on HTTP status** are unaffected. This is
+  the recommended pattern going forward and matches every other
+  well-shaped API.
+- **Fastest audit grep**: any `body.error` / `body.message` read in
+  Ruuter DSL or client code is a break. Rewrite to the header names
+  above.
+
+See `DIVERGENCES.md` DIV-022 for the source-of-truth rationale, and
+[`book/src/failure-modes.md`](book/src/failure-modes.md) for the
+operator-facing docs.
+
 ## Fastest way to audit a live config
 
 ```bash
@@ -317,6 +400,7 @@ Standard Rust workflow. Before touching code:
 |---|---|
 | Full breaking-change bullets + release notes | `CHANGELOG.md` |
 | Domain design (what Resql is/isn't) | `docs/DESIGN.md` |
+| Divergence-from-Java catalog (DIV-001..DIV-022) | `DIVERGENCES.md` |
 | Project rules (test hygiene, commit style, etc.) | `STANDARDS.md` |
 | Cross-project ruleset | `../DEV-REQUIREMENTS.md` |
 | h2ck.me audit trail (PR reviews, break-the-fix probes) | https://github.com/h2ckme/Resql-on-Rust |

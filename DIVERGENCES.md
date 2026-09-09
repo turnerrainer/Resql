@@ -381,3 +381,34 @@ require re-architecture.
 - **Migration.** Callers sending explicit `null` for optional filters
   keep working (JSON `null` for an optional still binds NULL).
 - **Reversibility.** low.
+
+## DIV-022 — Error envelope moved from body to response headers
+
+- **Field / behaviour.** Response body and headers on any non-2xx from
+  a query endpoint (`/:project/:tail`, `/:project/:tail/batch`).
+- **Source of truth.** Java Resql: body is
+  `{ "error": "<SimpleName>", "message": "<text>" }` on every error;
+  no error-specific response headers.
+- **Target behaviour.** Rust: body is always the empty JSON array
+  `[]` on error. The same information moves to two response headers:
+  - `X-Resql-Error-Code` — Java-canonical exception class name
+    (identifier, always ASCII).
+  - `X-Resql-Error-Message` — human-readable message, sanitised to
+    printable ASCII (newlines / non-printable → `?`, CR/LF stripped).
+  HTTP status and the exception-class identifiers are unchanged.
+- **Motivation.** Fixes
+  [Resql#25](https://github.com/turnerrainer/Resql/issues/25). Downstream
+  DSLs commonly branch on `body.length > 0` to decide "found vs.
+  not-found". With the Java shape, that check reads `undefined` on
+  an error body (a non-array object has no `.length`), which many
+  DSL evaluators coerce to `false` — so the "not found" branch fires
+  and the DB error is silently swallowed. Consequences range from a
+  wrong 404 to a DoS-amplifying fall-through in gateway-shaped
+  systems. Always-`[]` on error makes the naive check safe.
+- **Migration.** Callers that read `body["error"]` / `body["message"]`
+  must read `response.headers["x-resql-error-code"]` /
+  `response.headers["x-resql-error-message"]` instead. HTTP status and
+  the exception-class strings are unchanged. Full un-sanitised message
+  text still lives in the server log for the request's trace id.
+- **Reversibility.** low (surface change in one place —
+  `IntoResponse for ResqlError` in `src/error.rs`).

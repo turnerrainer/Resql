@@ -21,8 +21,9 @@
 //!   declaration. Batch endpoints get an extra `POST
 //!   /<path>/batch` wrapping `{ queries: [<same shape>] }`.
 //! - **responses** = 200 with `type: array` of the row shape derived
-//!   from `returns` (or open-shape when absent); 400 → `Error`
-//!   schema; 413 → same schema.
+//!   from `returns` (or open-shape when absent); 400 → `ErrorArray`
+//!   (empty array body + `X-Resql-Error-Code` / `X-Resql-Error-Message`
+//!   response headers, per issue #25); 413 → same shape.
 //!
 //! Deterministic ordering: projects, methods, paths, all sorted alpha
 //! at emit time so `diff` on the spec is meaningful across restarts.
@@ -85,13 +86,27 @@ pub fn build_spec(index: &QueryIndex, cfg: &OpenApiConfig) -> Value {
         "paths": Value::Object(paths),
         "components": {
             "schemas": {
-                "Error": {
-                    "type": "object",
-                    "properties": {
-                        "error": {"type": "string", "description": "Java-canonical exception class name"},
-                        "message": {"type": "string"}
-                    },
-                    "required": ["error", "message"]
+                // Error responses now use an "always-array body + headers"
+                // shape (see issue #25). The body is always [] on any
+                // non-2xx from a query endpoint so a naive DSL check like
+                // `body.length > 0` cannot silently fail-open into
+                // "empty result" when the query actually errored. The
+                // structured error info lives in the `X-Resql-Error-Code`
+                // and `X-Resql-Error-Message` response headers.
+                "ErrorArray": {
+                    "type": "array",
+                    "maxItems": 0,
+                    "description": "Empty array. Error details live in the X-Resql-Error-Code and X-Resql-Error-Message response headers."
+                }
+            },
+            "headers": {
+                "XResqlErrorCode": {
+                    "description": "Java-canonical exception class name (identifier, always ASCII).",
+                    "schema": {"type": "string"}
+                },
+                "XResqlErrorMessage": {
+                    "description": "Human-readable error message, sanitised to printable ASCII. Newlines and non-printable characters are replaced with '?'. Full un-sanitised text lives in the server log for the request's trace id.",
+                    "schema": {"type": "string"}
                 }
             }
         }
@@ -359,15 +374,23 @@ fn build_responses(decl: &Declaration, batch: bool) -> Value {
             }
         },
         "400": {
-            "description": "Bad Request",
+            "description": "Bad Request — body is `[]`; error kind + message live in response headers.",
+            "headers": {
+                "X-Resql-Error-Code": {"$ref": "#/components/headers/XResqlErrorCode"},
+                "X-Resql-Error-Message": {"$ref": "#/components/headers/XResqlErrorMessage"}
+            },
             "content": {
-                "application/json": {"schema": {"$ref": "#/components/schemas/Error"}}
+                "application/json": {"schema": {"$ref": "#/components/schemas/ErrorArray"}}
             }
         },
         "413": {
-            "description": "Payload Too Large",
+            "description": "Payload Too Large — body is `[]`; error kind + message live in response headers.",
+            "headers": {
+                "X-Resql-Error-Code": {"$ref": "#/components/headers/XResqlErrorCode"},
+                "X-Resql-Error-Message": {"$ref": "#/components/headers/XResqlErrorMessage"}
+            },
             "content": {
-                "application/json": {"schema": {"$ref": "#/components/schemas/Error"}}
+                "application/json": {"schema": {"$ref": "#/components/schemas/ErrorArray"}}
             }
         }
     })

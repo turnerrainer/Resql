@@ -21,10 +21,21 @@ requires a task, an ADR-shape note in DESIGN, and matching updates to
 
 ### Error response shape
 
-The `{"error": "<ExceptionClassName>", "message": "…"}` shape is fixed
-for interoperability with the original JVM Resql. Do not add fields
-without bumping the minor version and updating
-`book/src/failure-modes.md`.
+On any non-2xx from a query endpoint the response body is always the
+empty JSON array `[]`. The error envelope lives in two response headers:
+
+- `X-Resql-Error-Code` — Java-canonical exception class name.
+- `X-Resql-Error-Message` — human-readable message, sanitised to
+  printable ASCII (CR/LF stripped, non-printable → `?`).
+
+HTTP status and the exception-class identifiers are fixed for
+interoperability with the original JVM Resql; the on-the-wire shape
+diverged deliberately in issue #25 / [DIV-022](./DIVERGENCES.md) to
+make the naive downstream check `body.length > 0` safe (was previously
+`undefined` on an object body, silently routing DB errors into
+"not-found"). Do not add fields to the envelope without bumping the
+minor version and updating both `book/src/failure-modes.md` and
+`DIVERGENCES.md`.
 
 ### snake_case → camelCase column renaming
 

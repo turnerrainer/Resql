@@ -89,32 +89,51 @@ async fn datasources_response_keys_match_java_reference() {
     assert!(entry.get("password").is_none());
 }
 
+/// Documented divergence from the Java reference shape (issue #25).
+/// Java Resql returns `{ "error": "...", "message": "..." }` in the
+/// body on error. The Rust target returns an empty array body and
+/// carries the same information in `X-Resql-Error-Code` and
+/// `X-Resql-Error-Message` response headers so that a naive downstream
+/// check like `body.length > 0` cannot silently fail-open into
+/// "empty result" when the query actually errored.
 #[tokio::test]
-async fn error_body_shape_matches_java_reference() {
-    let expected = load_reference("error-body-java-shape.json");
-    let expected_obj = expected.as_object().unwrap();
-
+async fn error_envelope_delivered_via_headers_body_is_empty_array() {
     let app = TestAppBuilder::new().build().await;
-    let (status, body) = app
-        .request("POST", "/nonexistent-project/nonexistent", Some("{}"), &[])
+    let (status, code, message, body) = app
+        .request_err("POST", "/nonexistent-project/nonexistent", Some("{}"), &[])
         .await;
-    // Java-known conditions always return 400 with the Java shape.
+    // Java-known conditions still return 400.
     assert_eq!(status, 400);
-    for (key, _) in expected_obj {
-        if key.starts_with('_') {
-            continue;
-        }
-        assert!(
-            body.get(key).is_some(),
-            "error body missing Java-canonical key `{key}`; body = {body}"
-        );
-    }
-    // Exception class matches Java's SimpleName.
-    assert_eq!(body["error"], "ResqlRuntimeException");
+    // Body is always `[]` on any query-endpoint error (#25).
+    assert_eq!(body, serde_json::json!([]));
+    // Exception class matches Java's SimpleName — now in the header.
+    assert_eq!(code, "ResqlRuntimeException");
     // Message contains the requested path (Java: "Saved query '%s' does not exist").
-    assert!(
-        body["message"].as_str().unwrap().contains("nonexistent"),
-        "message = {}",
-        body["message"]
-    );
+    assert!(message.contains("nonexistent"), "message = {message}");
+}
+
+/// End-to-end check that the naive downstream DSL pattern from issue
+/// #25 no longer silently fails open. The pattern is:
+///
+/// ```yaml
+/// - condition: ${resql_res.response.body.length > 0}
+///   next: found
+///   next: not_found
+/// ```
+///
+/// On a DB error the body must be an array with `length == 0` (routes
+/// to `not_found`, which is expected), not a non-array object whose
+/// `.length` is `undefined` (which historically evaluated to false and
+/// silently routed to `not_found` on ANY error — turning DB errors into
+/// wrong-404s or worse).
+#[tokio::test]
+async fn error_body_length_check_is_dsl_safe() {
+    let app = TestAppBuilder::new().build().await;
+    let (_status, _code, _msg, body) = app
+        .request_err("POST", "/nonexistent-project/nonexistent", Some("{}"), &[])
+        .await;
+    let arr = body
+        .as_array()
+        .expect("error body must be an array so `.length` is defined");
+    assert_eq!(arr.len(), 0, "body must be `[]` on error, got: {body}");
 }

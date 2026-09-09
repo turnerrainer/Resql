@@ -64,13 +64,22 @@ Expected divergences (documented in DIVERGENCES.md):
   `"rig-sqlms"`). The 5 Java fields are shape-identical.
 - `/datasources`: `driverClassName` is `org.postgresql.Driver` from both
   sides; `jdbcUrl` may differ in exact form (URL scheme normalization).
+- **Error responses (issue #25):** Java returns
+  `{ "error": "…", "message": "…" }` in the body. Rust returns `[]` in
+  the body and moves the same information to the response headers
+  `X-Resql-Error-Code` and `X-Resql-Error-Message`. The status codes
+  and exception-class identifiers are unchanged. The rewrite makes a
+  naive downstream check `body.length > 0` safe: on any query-endpoint
+  error the check now sees 0 rows instead of `undefined`, so a DB
+  failure no longer silently routes to a "not-found" branch. The
+  `compat/reference-outputs/error-body-java-shape.json` reference was
+  removed accordingly.
 
 ## What lives here now
 
 - `reference-outputs/healthz-java-shape.json` — structural spec for a Java
   `/healthz` response. Not a live capture; a documented shape.
 - `reference-outputs/datasources-java-shape.json` — same for `/datasources`.
-- `reference-outputs/error-body-java-shape.json` — error response shape.
 - `scripts/schema.sql` — schema used by both sides during reproduction.
 - `configs/java-application.yml` — reference Java config.
 - `configs/rust-vs-java.yaml` — matching Rust config (same DB, same tree).
