@@ -1,9 +1,17 @@
-use axum::http::StatusCode;
+use axum::http::{HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use serde::Serialize;
+use serde_json::Value;
 use std::path::PathBuf;
 use thiserror::Error;
+
+/// Response headers that carry the error envelope on non-2xx responses.
+/// See `IntoResponse for ResqlError` (issue #25) — the response body itself
+/// is always the empty JSON array `[]` so a naive DSL check like
+/// `body.length > 0` cannot silently fail-open into "empty result" when
+/// the query actually errored.
+pub const ERROR_CODE_HEADER: &str = "x-resql-error-code";
+pub const ERROR_MESSAGE_HEADER: &str = "x-resql-error-message";
 
 #[derive(Debug, Error)]
 pub enum ResqlError {
@@ -101,12 +109,6 @@ impl ResqlError {
     }
 }
 
-#[derive(Serialize)]
-struct ErrorBody<'a> {
-    error: &'a str,
-    message: String,
-}
-
 impl IntoResponse for ResqlError {
     fn into_response(self) -> Response {
         // Emit a structured log line for every error we return so
@@ -115,7 +117,8 @@ impl IntoResponse for ResqlError {
         // used by the request middleware; the source-chain toggle is
         // handled by the middleware / handler that has config access
         // (see `logging.print_stack_trace`).
-        let status_code = self.status().as_u16();
+        let status = self.status();
+        let status_code = status.as_u16();
         let kind = self.kind();
         let message = self.to_string();
         if status_code >= 500 {
@@ -131,12 +134,38 @@ impl IntoResponse for ResqlError {
                 "{message}"
             );
         }
-        let body = ErrorBody {
-            error: kind,
-            message,
-        };
-        (self.status(), Json(body)).into_response()
+        // Body is always the empty JSON array — a naive DSL check like
+        // `body.length > 0` sees 0 rows on any error, so a DB failure
+        // no longer routes to a "not_found" branch by silently having
+        // an object body whose `.length` is `undefined`. Structured
+        // error info moves to the two response headers below. See #25.
+        let mut resp = (status, Json(Value::Array(Vec::new()))).into_response();
+        let headers = resp.headers_mut();
+        if let Ok(v) = HeaderValue::from_str(kind) {
+            headers.insert(HeaderName::from_static(ERROR_CODE_HEADER), v);
+        }
+        if let Ok(v) = HeaderValue::from_str(&sanitize_header_value(&message)) {
+            headers.insert(HeaderName::from_static(ERROR_MESSAGE_HEADER), v);
+        }
+        resp
     }
+}
+
+/// Restrict a free-form message to characters valid in an HTTP header
+/// value: printable ASCII (0x20–0x7E) plus horizontal tab. CR/LF are
+/// dropped (would inject a header split); everything else is replaced
+/// with `?`. The un-sanitised message is still available in the server
+/// log line emitted just above.
+fn sanitize_header_value(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if c == '\t' || (' '..='~').contains(&c) {
+            out.push(c);
+        } else {
+            out.push('?');
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -174,5 +203,39 @@ mod tests {
             ResqlError::BodyTooLarge.status(),
             StatusCode::PAYLOAD_TOO_LARGE
         );
+    }
+
+    #[test]
+    fn sanitize_header_value_strips_crlf_and_non_ascii() {
+        // Newlines would header-split; non-printable becomes '?'.
+        assert_eq!(sanitize_header_value("a\r\nb"), "a??b");
+        assert_eq!(sanitize_header_value("café"), "caf?");
+        // Tabs and printable ASCII survive.
+        assert_eq!(sanitize_header_value("a\tb c"), "a\tb c");
+    }
+
+    #[tokio::test]
+    async fn into_response_body_is_empty_array_and_headers_carry_kind() {
+        use http_body_util::BodyExt;
+        let resp = ResqlError::QueryNotFound("/foo/bar".into()).into_response();
+        let status = resp.status();
+        let code = resp
+            .headers()
+            .get(ERROR_CODE_HEADER)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        let message = resp
+            .headers()
+            .get(ERROR_MESSAGE_HEADER)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(code, "ResqlRuntimeException");
+        assert!(message.contains("/foo/bar"), "message = {message}");
+        // The DSL-safety invariant: naive `body.length > 0` must see 0.
+        assert_eq!(std::str::from_utf8(&bytes).unwrap(), "[]");
     }
 }

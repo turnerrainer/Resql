@@ -33,12 +33,14 @@ async fn x_datasource_header_with_unknown_name_is_forbidden() {
         .with_sql("demo/POST/x.sql", "SELECT 1 AS n")
         .build()
         .await;
-    let (status, body) = app
-        .request("POST", "/demo/x", Some("{}"), &[("x-datasource", "nope")])
+    let (status, code, message, body) = app
+        .request_err("POST", "/demo/x", Some("{}"), &[("x-datasource", "nope")])
         .await;
     assert_eq!(status, 403);
-    assert_eq!(body["error"], "ForbiddenDatasourceOverrideException");
-    assert!(body["message"].as_str().unwrap().contains("'nope'"));
+    assert_eq!(code, "ForbiddenDatasourceOverrideException");
+    assert!(message.contains("'nope'"), "message = {message}");
+    // Body invariant per #25: always `[]` on any query-endpoint error.
+    assert_eq!(body, serde_json::json!([]));
 }
 
 #[tokio::test]

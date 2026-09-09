@@ -262,6 +262,32 @@ impl TestApp {
         (status, body)
     }
 
+    /// Convenience for error-response tests. Returns
+    /// `(status, code_header, message_header, body)` — the body is `[]`
+    /// on any query-endpoint error (issue #25). Panics if the two
+    /// error headers are absent, which is what a well-shaped error
+    /// response guarantees.
+    pub async fn request_err(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<&str>,
+        headers: &[(&str, &str)],
+    ) -> (u16, String, String, Value) {
+        let (status, resp_headers, body) = self.request_full(method, path, body, headers).await;
+        let code = resp_headers
+            .get("x-resql-error-code")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        let message = resp_headers
+            .get("x-resql-error-message")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        (status, code, message, body)
+    }
+
     /// Same as `request` but also returns the response headers as a
     /// `HeaderMap`. Use when a test needs to assert on headers the
     /// middleware set (trace id, CORS, etc.).

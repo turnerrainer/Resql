@@ -1,22 +1,38 @@
 # Failure modes
 
-Every error response is a JSON object of shape:
+Every error response has an empty JSON array body:
 
 ```json
-{"error": "<ExceptionClassName>", "message": "<human-readable>"}
+[]
 ```
 
-`error` is a stable identifier suitable for programmatic branching.
-`message` is descriptive and may change between minor versions.
+and carries the error envelope in two response headers:
+
+```
+X-Resql-Error-Code:    <ExceptionClassName>
+X-Resql-Error-Message: <human-readable>
+```
+
+`X-Resql-Error-Code` is a stable identifier suitable for programmatic
+branching. `X-Resql-Error-Message` is descriptive and may change between
+minor versions — and is sanitised to printable ASCII (CR/LF stripped,
+non-printable → `?`). Full un-sanitised text stays in the server log for
+the request's trace id.
+
+The empty-array body makes a naive downstream check like
+`response.body.length > 0` safe: on any error the check now sees 0 rows
+instead of `undefined`, so a DB failure cannot silently route into a
+"not-found" branch by having a non-array body whose `.length` is
+`undefined`. Issue #25 / DIV-022 (`DIVERGENCES.md` in the repo root).
 
 ## HTTP status codes
 
 | Status | When |
 |---|---|
 | **200** | Query executed. Body is a JSON array (possibly empty). |
-| **400** | Any structured application error — see the table below. |
-| **413** | Request body larger than `server.max_body_bytes`. |
-| **500** | Panic or unexpected internal error. Reported to logs; body is minimal. |
+| **400** | Any structured application error — see the table below. Body: `[]`. |
+| **413** | Request body larger than `server.max_body_bytes`. Body: `[]`. |
+| **500** | Panic or unexpected internal error. Reported to logs; body: `[]`. |
 
 Note: JVM Resql returned **400 for every error class**, including
 "query not found." Resql keeps that behaviour for compatibility;
@@ -24,7 +40,7 @@ only `413` (body too large) and `500` (unhandled internal) sit outside.
 
 ## Error catalog
 
-| `error` field | Cause | HTTP |
+| `X-Resql-Error-Code` header | Cause | HTTP |
 |---|---|---|
 | `ResqlRuntimeException` | The URL doesn't match any loaded SQL file. | 400 |
 | `UnknownDataSourceNameException` | The resolved datasource name is not in config. | 400 |

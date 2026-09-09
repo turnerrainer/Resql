@@ -61,10 +61,10 @@ async fn missing_param_returns_400_named_shape() {
         )
         .build()
         .await;
-    let (status, body) = app.request("POST", "/demo/x", Some("{}"), &[]).await;
+    let (status, code, message, _) = app.request_err("POST", "/demo/x", Some("{}"), &[]).await;
     assert_eq!(status, 400);
-    assert_eq!(body["error"], "InvalidDataAccessApiUsageException");
-    assert!(body["message"].as_str().unwrap().contains("'login'"));
+    assert_eq!(code, "InvalidDataAccessApiUsageException");
+    assert!(message.contains("'login'"), "message = {message}");
 }
 
 #[tokio::test]
@@ -94,10 +94,10 @@ async fn missing_optional_param_binds_null() {
 #[tokio::test]
 async fn query_not_found_returns_400() {
     let app = TestAppBuilder::new().build().await;
-    let (status, body) = app.request("POST", "/nope/nope", Some("{}"), &[]).await;
+    let (status, code, message, _) = app.request_err("POST", "/nope/nope", Some("{}"), &[]).await;
     assert_eq!(status, 400);
-    assert_eq!(body["error"], "ResqlRuntimeException");
-    assert!(body["message"].as_str().unwrap().contains("'/nope/nope'"));
+    assert_eq!(code, "ResqlRuntimeException");
+    assert!(message.contains("'/nope/nope'"), "message = {message}");
 }
 
 #[tokio::test]
@@ -107,12 +107,12 @@ async fn unknown_datasource_returns_400() {
         .with_sql("otherproject/POST/x.sql", "SELECT 1 AS n")
         .build()
         .await;
-    let (status, body) = app
-        .request("POST", "/otherproject/x", Some("{}"), &[])
+    let (status, code, message, _) = app
+        .request_err("POST", "/otherproject/x", Some("{}"), &[])
         .await;
     assert_eq!(status, 400);
-    assert_eq!(body["error"], "UnknownDataSourceNameException");
-    assert!(body["message"].as_str().unwrap().contains("'otherproject'"));
+    assert_eq!(code, "UnknownDataSourceNameException");
+    assert!(message.contains("'otherproject'"), "message = {message}");
 }
 
 #[tokio::test]
@@ -121,9 +121,9 @@ async fn sql_error_returns_400() {
         .with_sql("demo/POST/x.sql", "SELECT * FROM does_not_exist")
         .build()
         .await;
-    let (status, body) = app.request("POST", "/demo/x", Some("{}"), &[]).await;
+    let (status, code, _message, _) = app.request_err("POST", "/demo/x", Some("{}"), &[]).await;
     assert_eq!(status, 400);
-    assert_eq!(body["error"], "BadSqlGrammarException");
+    assert_eq!(code, "BadSqlGrammarException");
 }
 
 #[tokio::test]
@@ -184,8 +184,8 @@ async fn extra_body_params_rejected() {
         .with_sql("demo/POST/x.sql", "SELECT :used AS u")
         .build()
         .await;
-    let (status, body) = app
-        .request(
+    let (status, code, message, _) = app
+        .request_err(
             "POST",
             "/demo/x",
             Some(r#"{"used": "42", "extra": "hi"}"#),
@@ -193,8 +193,8 @@ async fn extra_body_params_rejected() {
         )
         .await;
     assert_eq!(status, 400);
-    assert_eq!(body["error"], "UnknownParameterException");
-    assert!(body["message"].as_str().unwrap().contains("'extra'"));
+    assert_eq!(code, "UnknownParameterException");
+    assert!(message.contains("'extra'"), "message = {message}");
 }
 
 #[tokio::test]
@@ -206,11 +206,11 @@ async fn wrong_type_returns_400() {
         )
         .build()
         .await;
-    let (status, body) = app
-        .request("POST", "/demo/x", Some(r#"{"n": true}"#), &[])
+    let (status, code, _message, _) = app
+        .request_err("POST", "/demo/x", Some(r#"{"n": true}"#), &[])
         .await;
     assert_eq!(status, 400);
-    assert_eq!(body["error"], "InvalidParameterTypeException");
+    assert_eq!(code, "InvalidParameterTypeException");
 }
 
 #[tokio::test]
@@ -224,8 +224,8 @@ async fn value_outside_declared_enum_returns_400() {
         )
         .build()
         .await;
-    let (status, body) = app
-        .request(
+    let (status, code, msg, _) = app
+        .request_err(
             "POST",
             "/demo/set-status",
             Some(r#"{"status": "pending"}"#),
@@ -233,8 +233,7 @@ async fn value_outside_declared_enum_returns_400() {
         )
         .await;
     assert_eq!(status, 400);
-    assert_eq!(body["error"], "InvalidParameterValueException");
-    let msg = body["message"].as_str().unwrap();
+    assert_eq!(code, "InvalidParameterValueException");
     assert!(msg.contains("status"), "message = {msg}");
     assert!(msg.contains("pending"), "message = {msg}");
 }
@@ -248,11 +247,11 @@ async fn get_query_value_outside_declared_enum_returns_400() {
         )
         .build()
         .await;
-    let (status, body) = app
-        .request("GET", "/demo/by-status?status=bogus", None, &[])
+    let (status, code, _message, _) = app
+        .request_err("GET", "/demo/by-status?status=bogus", None, &[])
         .await;
     assert_eq!(status, 400);
-    assert_eq!(body["error"], "InvalidParameterValueException");
+    assert_eq!(code, "InvalidParameterValueException");
 }
 
 #[tokio::test]
@@ -319,8 +318,8 @@ async fn batch_with_missing_param_returns_400() {
         )
         .build()
         .await;
-    let (status, body) = app
-        .request(
+    let (status, code, _message, _) = app
+        .request_err(
             "POST",
             "/demo/lookup/batch",
             Some(r#"{"queries":[{"login":"a"},{}]}"#),
@@ -328,7 +327,7 @@ async fn batch_with_missing_param_returns_400() {
         )
         .await;
     assert_eq!(status, 400);
-    assert_eq!(body["error"], "InvalidDataAccessApiUsageException");
+    assert_eq!(code, "InvalidDataAccessApiUsageException");
 }
 
 #[tokio::test]
@@ -346,8 +345,8 @@ async fn batch_rolls_back_on_error_no_partial_writes() {
         .await;
 
     // 'a' then 'a' again then 'c' — second insert fails.
-    let (status, body) = app
-        .request(
+    let (status, code, msg, _) = app
+        .request_err(
             "POST",
             "/demo/add/batch",
             Some(r#"{"queries":[{"login":"a"},{"login":"a"},{"login":"c"}]}"#),
@@ -355,12 +354,11 @@ async fn batch_rolls_back_on_error_no_partial_writes() {
         )
         .await;
     assert_eq!(status, 400);
-    assert_eq!(body["error"], "BadSqlGrammarException");
+    assert_eq!(code, "BadSqlGrammarException");
 
     // R9: the response identifies the failing position and total but
     // must NOT include the underlying UNIQUE-constraint detail. That
     // detail stays in the server log, not the caller-visible body.
-    let msg = body["message"].as_str().unwrap();
     assert!(
         msg.contains("2 of 3"),
         "expected position + size in message, got: {msg}"
@@ -398,9 +396,11 @@ async fn transactional_marker_rolls_back_on_error() {
         .build()
         .await;
 
-    let (status, body) = app.request("POST", "/demo/tx-fail", Some("{}"), &[]).await;
+    let (status, code, _message, _) = app
+        .request_err("POST", "/demo/tx-fail", Some("{}"), &[])
+        .await;
     assert_eq!(status, 400);
-    assert_eq!(body["error"], "BadSqlGrammarException");
+    assert_eq!(code, "BadSqlGrammarException");
 
     let (s2, cnt) = app.request("GET", "/demo/count", None, &[]).await;
     assert_eq!(s2, 200);
@@ -436,11 +436,11 @@ async fn batch_body_must_have_queries_field() {
         .with_sql("demo/POST/lookup.sql", "SELECT 1 AS n")
         .build()
         .await;
-    let (status, body) = app
-        .request("POST", "/demo/lookup/batch", Some(r#"{"other":[]}"#), &[])
+    let (status, code, _message, _) = app
+        .request_err("POST", "/demo/lookup/batch", Some(r#"{"other":[]}"#), &[])
         .await;
     assert_eq!(status, 400);
-    assert_eq!(body["error"], "MalformedRequestException");
+    assert_eq!(code, "MalformedRequestException");
 }
 
 #[tokio::test]
@@ -491,7 +491,7 @@ async fn method_mismatch_returns_query_not_found() {
         .with_sql("demo/POST/x.sql", "SELECT 1 AS n")
         .build()
         .await;
-    let (status, body) = app.request("GET", "/demo/x", None, &[]).await;
+    let (status, code, _message, _) = app.request_err("GET", "/demo/x", None, &[]).await;
     assert_eq!(status, 400);
-    assert_eq!(body["error"], "ResqlRuntimeException");
+    assert_eq!(code, "ResqlRuntimeException");
 }

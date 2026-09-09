@@ -44,8 +44,8 @@ async fn r1_forbidden_message_names_offender_but_not_registry() {
         .with_sql("demo/POST/x.sql", "SELECT 1 AS n")
         .build()
         .await;
-    let (status, body) = app
-        .request(
+    let (status, _code, msg, _body) = app
+        .request_err(
             "POST",
             "/demo/x",
             Some("{}"),
@@ -53,7 +53,6 @@ async fn r1_forbidden_message_names_offender_but_not_registry() {
         )
         .await;
     assert_eq!(status, 403);
-    let msg = body["message"].as_str().unwrap();
     assert!(msg.contains("definitely-not-real"), "msg = {msg}");
     // Must NOT leak the set of registered datasources.
     assert!(!msg.contains("primary"), "msg = {msg}");

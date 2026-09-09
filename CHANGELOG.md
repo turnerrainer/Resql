@@ -6,6 +6,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed (BREAKING)
+
+- **Error responses on query endpoints now use an empty-array body +
+  headers envelope.** Body is always `[]` on any non-2xx from
+  `/:project/:tail` (or the batch shape); the same information — the
+  Java-canonical exception class name and the human-readable message —
+  moves to the response headers `X-Resql-Error-Code` and
+  `X-Resql-Error-Message`. HTTP status and the exception-class
+  identifiers are unchanged; the message header is sanitised to
+  printable ASCII (CR/LF stripped, non-printable → `?`) and the full
+  un-sanitised text stays in the server log for the request's trace
+  id. Fixes a whole class of silent fail-open bugs in downstream DSLs
+  that branched on `body.length > 0` — with the old object body,
+  `.length` was `undefined` on error, which many DSL evaluators coerce
+  to `false`, silently routing DB failures into a "not-found" branch.
+  Callers that used to read `body["error"]` / `body["message"]` must
+  now read the two response headers. Issue #25. See DIV-022 in
+  `DIVERGENCES.md`.
+
 ### Fixed
 
 - **`password_env` no longer silently defeated when the datasource URL

@@ -179,7 +179,9 @@ query had been sent on its own.
 curl -X POST http://localhost:8080/crm/users/create/batch \
      -H "content-type: application/json" \
      -d '{"queries":[{"login":"a"},{"login":"a"},{"login":"c"}]}'
-# → 400 {"error":"BadSqlGrammarException", "message":"..."}
+# → 400 []
+#   X-Resql-Error-Code: BadSqlGrammarException
+#   X-Resql-Error-Message: Batch failed at statement 2 of 3, rolled back
 ```
 
 Missing-parameter checks run against every parameter set BEFORE the

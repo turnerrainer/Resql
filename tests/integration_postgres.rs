@@ -317,11 +317,11 @@ async fn pg_insert_duplicate_unique_returns_400() {
         .request("POST", "/pg/users/create", Some(&payload.to_string()), &[])
         .await;
     assert_eq!(s1, 200);
-    let (s2, body2) = app
-        .request("POST", "/pg/users/create", Some(&payload.to_string()), &[])
+    let (s2, code, _msg, _body) = app
+        .request_err("POST", "/pg/users/create", Some(&payload.to_string()), &[])
         .await;
     assert_eq!(s2, 400);
-    assert_eq!(body2["error"], "BadSqlGrammarException");
+    assert_eq!(code, "BadSqlGrammarException");
 }
 
 #[tokio::test]
@@ -443,23 +443,23 @@ async fn pg_number_after_null_on_same_cached_statement_does_not_corrupt() {
 async fn pg_missing_param_400() {
     let url = require_pg!();
     let app = app_with_pg(&url).await;
-    let (status, body) = app
-        .request("POST", "/pg/typechecks/required", Some("{}"), &[])
+    let (status, code, msg, _) = app
+        .request_err("POST", "/pg/typechecks/required", Some("{}"), &[])
         .await;
     assert_eq!(status, 400);
-    assert_eq!(body["error"], "InvalidDataAccessApiUsageException");
-    assert!(body["message"].as_str().unwrap().contains("'login'"));
+    assert_eq!(code, "InvalidDataAccessApiUsageException");
+    assert!(msg.contains("'login'"), "message = {msg}");
 }
 
 #[tokio::test]
 async fn pg_sql_error_400() {
     let url = require_pg!();
     let app = app_with_pg(&url).await;
-    let (status, body) = app
-        .request("POST", "/pg/typechecks/bad-grammar", Some("{}"), &[])
+    let (status, code, _msg, _) = app
+        .request_err("POST", "/pg/typechecks/bad-grammar", Some("{}"), &[])
         .await;
     assert_eq!(status, 400);
-    assert_eq!(body["error"], "BadSqlGrammarException");
+    assert_eq!(code, "BadSqlGrammarException");
 }
 
 // ─── Column renaming ─────────────────────────────────────────────────
@@ -527,8 +527,8 @@ async fn pg_batch_rolls_back_on_error() {
             {"login": format!("txbatch_c_{}", uuid()), "email": "c@x", "status": "active"},
         ]
     });
-    let (status, body) = app
-        .request(
+    let (status, code, msg, _) = app
+        .request_err(
             "POST",
             "/pg/users/create/batch",
             Some(&payload.to_string()),
@@ -536,11 +536,10 @@ async fn pg_batch_rolls_back_on_error() {
         )
         .await;
     assert_eq!(status, 400);
-    assert_eq!(body["error"], "BadSqlGrammarException");
+    assert_eq!(code, "BadSqlGrammarException");
     // R9: caller-visible message identifies the failing position but
     // must not disclose the Postgres error text (which would leak
     // constraint / column / table names to the caller).
-    let msg = body["message"].as_str().unwrap();
     assert!(msg.contains("2 of 3"), "msg = {msg}");
     let msg_lc = msg.to_ascii_lowercase();
     assert!(
@@ -951,14 +950,14 @@ async fn pg_typed_array_wrong_element_type_returns_400() {
         "title": format!("badcats_{}", uuid()),
         "categories": ["ok", 42, "also-ok"],
     });
-    let (status, body) = app
-        .request("POST", "/pg/posts/create", Some(&payload.to_string()), &[])
+    let (status, code, msg, body) = app
+        .request_err("POST", "/pg/posts/create", Some(&payload.to_string()), &[])
         .await;
     assert_eq!(status, 400, "wrong element type must 400: {body}");
-    assert_eq!(body["error"], "InvalidParameterTypeException");
+    assert_eq!(code, "InvalidParameterTypeException");
     assert!(
-        body["message"].as_str().unwrap().contains("categories[1]"),
-        "message must name the failing element index: {body}",
+        msg.contains("categories[1]"),
+        "message must name the failing element index: {msg}",
     );
 }
 
@@ -1166,8 +1165,8 @@ async fn pg_scalar_uuid_valid_round_trips() {
 async fn pg_scalar_uuid_bad_literal_returns_400_at_boundary() {
     let url = require_pg!();
     let app = app_with_scalar_semantic_params(&url).await;
-    let (status, body) = app
-        .request(
+    let (status, code, msg, body) = app
+        .request_err(
             "POST",
             "/pg/scalars/uuid-echo",
             Some(r#"{"id": "not-a-uuid"}"#),
@@ -1176,12 +1175,12 @@ async fn pg_scalar_uuid_bad_literal_returns_400_at_boundary() {
         .await;
     assert_eq!(status, 400);
     assert_eq!(
-        body["error"], "InvalidParameterTypeException",
+        code, "InvalidParameterTypeException",
         "must surface as a boundary validation error, not a Postgres grammar error: {body}",
     );
     assert!(
-        body["message"].as_str().unwrap().contains("'id'"),
-        "message must name the failing param: {body}",
+        msg.contains("'id'"),
+        "message must name the failing param: {msg}",
     );
 }
 
@@ -1205,8 +1204,8 @@ async fn pg_scalar_date_valid_round_trips() {
 async fn pg_scalar_date_bad_literal_returns_400_at_boundary() {
     let url = require_pg!();
     let app = app_with_scalar_semantic_params(&url).await;
-    let (status, body) = app
-        .request(
+    let (status, code, _msg, _body) = app
+        .request_err(
             "POST",
             "/pg/scalars/date-echo",
             Some(r#"{"d": "2026-13-45"}"#),
@@ -1214,7 +1213,7 @@ async fn pg_scalar_date_bad_literal_returns_400_at_boundary() {
         )
         .await;
     assert_eq!(status, 400);
-    assert_eq!(body["error"], "InvalidParameterTypeException");
+    assert_eq!(code, "InvalidParameterTypeException");
 }
 
 #[tokio::test]
@@ -1239,8 +1238,8 @@ async fn pg_scalar_datetime_valid_round_trips() {
 async fn pg_scalar_datetime_bad_literal_returns_400_at_boundary() {
     let url = require_pg!();
     let app = app_with_scalar_semantic_params(&url).await;
-    let (status, body) = app
-        .request(
+    let (status, code, _msg, _body) = app
+        .request_err(
             "POST",
             "/pg/scalars/datetime-echo",
             Some(r#"{"ts": "sometime yesterday"}"#),
@@ -1248,7 +1247,7 @@ async fn pg_scalar_datetime_bad_literal_returns_400_at_boundary() {
         )
         .await;
     assert_eq!(status, 400);
-    assert_eq!(body["error"], "InvalidParameterTypeException");
+    assert_eq!(code, "InvalidParameterTypeException");
 }
 
 // ─── Corner 5: semantic-type arrays bind natively (uuid[], date[],
@@ -1355,8 +1354,8 @@ async fn pg_uuid_array_null_then_populated_stays_cache_stable() {
 async fn pg_uuid_array_bad_element_returns_400() {
     let url = require_pg!();
     let app = app_with_semantic_arrays(&url).await;
-    let (status, body) = app
-        .request(
+    let (status, code, msg, body) = app
+        .request_err(
             "POST",
             "/pg/semantic-arrays/insert-uuids",
             Some(r#"{"uuids": ["11111111-1111-1111-1111-111111111111", "not-a-uuid"]}"#),
@@ -1364,10 +1363,10 @@ async fn pg_uuid_array_bad_element_returns_400() {
         )
         .await;
     assert_eq!(status, 400, "bad uuid element must 400: {body}");
-    assert_eq!(body["error"], "InvalidParameterTypeException");
+    assert_eq!(code, "InvalidParameterTypeException");
     assert!(
-        body["message"].as_str().unwrap().contains("uuids[1]"),
-        "message must name failing element: {body}",
+        msg.contains("uuids[1]"),
+        "message must name failing element: {msg}",
     );
 }
 
@@ -1420,8 +1419,8 @@ async fn pg_date_array_null_then_populated_stays_cache_stable() {
 async fn pg_date_array_bad_element_returns_400() {
     let url = require_pg!();
     let app = app_with_semantic_arrays(&url).await;
-    let (status, body) = app
-        .request(
+    let (status, _code, msg, body) = app
+        .request_err(
             "POST",
             "/pg/semantic-arrays/insert-dates",
             Some(r#"{"dates": ["2026-07-01", "not-a-date"]}"#),
@@ -1430,8 +1429,8 @@ async fn pg_date_array_bad_element_returns_400() {
         .await;
     assert_eq!(status, 400, "bad date element must 400: {body}");
     assert!(
-        body["message"].as_str().unwrap().contains("dates[1]"),
-        "message must name failing element: {body}",
+        msg.contains("dates[1]"),
+        "message must name failing element: {msg}",
     );
 }
 
@@ -1784,8 +1783,8 @@ async fn pg_transactional_marker_rolls_back_multistatement() {
     let url = require_pg!();
     let app = app_with_tx_marker(&url).await;
     let actor = format!("txmarker_{}", uuid());
-    let (status, body) = app
-        .request(
+    let (status, code, _msg, _body) = app
+        .request_err(
             "POST",
             "/pg/tx/insert-then-fail",
             Some(&json!({"actor": actor}).to_string()),
@@ -1793,7 +1792,7 @@ async fn pg_transactional_marker_rolls_back_multistatement() {
         )
         .await;
     assert_eq!(status, 400);
-    assert_eq!(body["error"], "BadSqlGrammarException");
+    assert_eq!(code, "BadSqlGrammarException");
 
     let (s2, cnt) = app
         .request(
