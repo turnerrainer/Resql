@@ -6,6 +6,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`password_env` no longer silently defeated when the datasource URL
+  already carries a `user:pw@` component.** Config-supplied credentials
+  (from `password_env` or the Java-compat `password` field) now override
+  any userinfo embedded in the URL, and a WARN log line names the
+  collision so an operator who rotated the URL's password without
+  clearing `password_env` notices that the env variable is now the
+  source of truth. Previous behaviour returned the URL unchanged,
+  which turned `password_env` into a decoration and let stale
+  URL-embedded passwords silently take effect. Issue #27.
+
 ## [0.2.0-alpha] - 2026-09-06
 
 Security release. Closes the [h2ck.me](https://github.com/h2ckme) v1 pre-publication audit (findings R1–R7 + R9, all ✅). **MINOR bump because config defaults were flipped in ways that will make some existing `0.1.x-alpha` configs behave differently or refuse to boot.** See the [README "Upgrading to 0.2.0-alpha"](https://github.com/turnerrainer/Resql/blob/dev/README.md#upgrading-to-020-alpha) table for the operator-facing short list and [`CLAUDE.md`](https://github.com/turnerrainer/Resql/blob/dev/CLAUDE.md#v1-security-audit-changes-breaking-for-existing-configs) for grep recipes + a paste-in Python auditor.
