@@ -1818,3 +1818,92 @@ fn uuid() -> String {
         .unwrap();
     format!("{}{}", n.as_millis(), n.subsec_nanos())
 }
+
+// ─── Issue #26 — user-defined ENUM columns are auto-coerced to text ──
+
+async fn app_with_enums(url: &str) -> common::TestApp {
+    TestAppBuilder::new()
+        .no_sqlite_datasources()
+        .with_postgres_datasource("pg", url)
+        .with_sql(
+            "pg/GET/tickets/by-title.sql",
+            "SELECT id, title, priority, tags FROM tickets WHERE title = :title",
+        )
+        .with_sql(
+            "pg/GET/tickets/all.sql",
+            "SELECT title, priority FROM tickets ORDER BY id",
+        )
+        .build()
+        .await
+}
+
+#[tokio::test]
+async fn pg_enum_column_selected_without_cast_returns_label_string() {
+    let url = require_pg!();
+    let app = app_with_enums(&url).await;
+    let (status, body) = app
+        .request(
+            "GET",
+            "/pg/tickets/by-title?title=login%20broken",
+            None,
+            &[],
+        )
+        .await;
+    assert_eq!(status, 200, "enum SELECT should not error: {body}");
+    assert_eq!(
+        body[0]["priority"],
+        Value::String("high".into()),
+        "enum column must come back as its text label, not null. body = {body}"
+    );
+}
+
+#[tokio::test]
+async fn pg_enum_column_multi_row_labels_are_string() {
+    // Regression cover: without the fix every row's `priority` would be
+    // `null`, so `body.length > 0` (the naive DSL check) would still see
+    // rows but every enum value would be lost.
+    let url = require_pg!();
+    let app = app_with_enums(&url).await;
+    let (status, body) = app.request("GET", "/pg/tickets/all", None, &[]).await;
+    assert_eq!(status, 200, "response: {body}");
+    let rows = body.as_array().unwrap();
+    assert_eq!(rows.len(), 3);
+    for row in rows {
+        assert!(
+            row["priority"].is_string(),
+            "enum column must decode as string, got: {row}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn pg_enum_array_column_returns_array_of_labels() {
+    let url = require_pg!();
+    let app = app_with_enums(&url).await;
+    let (status, body) = app
+        .request(
+            "GET",
+            "/pg/tickets/by-title?title=typo%20in%20docs",
+            None,
+            &[],
+        )
+        .await;
+    assert_eq!(status, 200, "response: {body}");
+    assert_eq!(body[0]["tags"], json!(["low", "medium"]));
+}
+
+#[tokio::test]
+async fn pg_empty_enum_array_returns_empty_array() {
+    let url = require_pg!();
+    let app = app_with_enums(&url).await;
+    let (status, body) = app
+        .request(
+            "GET",
+            "/pg/tickets/by-title?title=perf%20regression",
+            None,
+            &[],
+        )
+        .await;
+    assert_eq!(status, 200, "response: {body}");
+    assert_eq!(body[0]["tags"], json!([]));
+}

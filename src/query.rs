@@ -1,5 +1,5 @@
 use serde_json::{Map, Value};
-use sqlx::postgres::PgRow;
+use sqlx::postgres::{PgRow, PgTypeKind};
 use sqlx::sqlite::SqliteRow;
 use sqlx::{Column, Row, TypeInfo};
 
@@ -1086,11 +1086,48 @@ fn bind_sqlite<'q>(
     }
 }
 
+/// Decode a Postgres value at `idx` as UTF-8 text via its raw wire form.
+/// Used for column kinds sqlx doesn't include in its built-in `String`
+/// compatibility set (currently: user-defined enums). Postgres transmits
+/// enum values as their text label in both text and binary formats, so a
+/// raw UTF-8 read yields the label a caller expects.
+fn decode_pg_text_scalar(row: &PgRow, idx: usize) -> Value {
+    use sqlx::{Decode, ValueRef};
+    let Ok(raw) = row.try_get_raw(idx) else {
+        return Value::Null;
+    };
+    if raw.is_null() {
+        return Value::Null;
+    }
+    match <String as Decode<sqlx::Postgres>>::decode(raw) {
+        Ok(s) => Value::String(s),
+        Err(_) => Value::Null,
+    }
+}
+
+/// Decode a Postgres array whose element type isn't in sqlx's `Vec<String>`
+/// compatibility set. Same rationale as `decode_pg_text_scalar` — used for
+/// enum arrays.
+fn decode_pg_text_array(row: &PgRow, idx: usize) -> Value {
+    use sqlx::{Decode, ValueRef};
+    let Ok(raw) = row.try_get_raw(idx) else {
+        return Value::Null;
+    };
+    if raw.is_null() {
+        return Value::Null;
+    }
+    match <Vec<String> as Decode<sqlx::Postgres>>::decode(raw) {
+        Ok(v) => Value::Array(v.into_iter().map(Value::String).collect()),
+        Err(_) => Value::Null,
+    }
+}
+
 fn pg_row_to_json(row: &PgRow) -> Map<String, Value> {
     let mut out = Map::new();
     for (idx, col) in row.columns().iter().enumerate() {
         let key = snake_to_camel(col.name());
-        let value = pg_column_value(row, idx, col.type_info().name());
+        let type_info = col.type_info();
+        let value = pg_column_value(row, idx, type_info.name(), type_info.kind());
         out.insert(key, value);
     }
     out
@@ -1106,7 +1143,23 @@ fn sqlite_row_to_json(row: &SqliteRow) -> Map<String, Value> {
     out
 }
 
-fn pg_column_value(row: &PgRow, idx: usize, ty: &str) -> Value {
+fn pg_column_value(row: &PgRow, idx: usize, ty: &str, kind: &PgTypeKind) -> Value {
+    // User-defined ENUM: sqlx's `String` decoder isn't compatible with a
+    // custom enum OID, so `try_get::<Option<String>>` errors and the
+    // column falls through every branch below to a silent `null` (or
+    // errors, depending on sqlx version). Postgres transmits enum values
+    // as their text label on the wire, so decoding the raw value as UTF-8
+    // is safe. Callers no longer need `::text` casts. Issue #26.
+    if let PgTypeKind::Enum(_) = kind {
+        return decode_pg_text_scalar(row, idx);
+    }
+    // Enum arrays (`_status_type` etc.) — same rationale as the scalar
+    // case: without this branch the whole array comes back as JSON null.
+    if let PgTypeKind::Array(inner) = kind {
+        if matches!(inner.kind(), PgTypeKind::Enum(_)) {
+            return decode_pg_text_array(row, idx);
+        }
+    }
     let ty_upper = ty.to_ascii_uppercase();
     // Try nullable first — if the column is NULL, short-circuit.
     if let Ok(Some(v)) = row.try_get::<Option<String>, _>(idx) {
