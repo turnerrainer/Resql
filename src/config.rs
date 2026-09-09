@@ -361,6 +361,13 @@ impl DatasourceConfig {
     /// Prefers `password_env` (Rust-canonical, env-var indirection); falls
     /// back to the plaintext `password` field if only that is set (Java-compat
     /// shape). If neither is set, returns the URL unchanged.
+    ///
+    /// When the URL already carries a `user:pw@` userinfo component *and*
+    /// a password is being injected, the config-supplied credential wins —
+    /// the URL's userinfo is stripped and replaced. A WARN log line names
+    /// the collision so an operator who set `password_env` and then edited
+    /// the URL to a new password (a natural rotation instinct) notices that
+    /// the config value is now the source of truth, not the URL. Issue #27.
     pub fn resolved_url(&self) -> Result<String, ResqlError> {
         let (pw, source) = if !self.password_env.is_empty() {
             let value = std::env::var(&self.password_env).map_err(|_| {
@@ -375,25 +382,53 @@ impl DatasourceConfig {
         } else {
             return Ok(self.url.clone());
         };
-        let _ = source; // named for readability, no runtime effect
+        if url_has_userinfo(&self.url) {
+            tracing::warn!(
+                datasource = %self.name,
+                source = source,
+                "datasource url carries embedded user:password@ and `{source}` is also set; \
+                 config-supplied credentials override the URL's userinfo. \
+                 Remove the credentials from the url to silence this warning."
+            );
+        }
         Ok(inject_userinfo(&self.url, &self.username, &pw))
     }
 }
 
+/// True iff a `scheme://user[:pw]@host/...` URL carries a userinfo
+/// component. Used to detect the `password_env` + URL-userinfo collision
+/// that silently defeats env-var injection.
+fn url_has_userinfo(url: &str) -> bool {
+    let Some(scheme_end) = url.find("://") else {
+        return false;
+    };
+    let after_scheme = &url[scheme_end + 3..];
+    // Only a `@` before the first `/`, `?`, or `#` counts as userinfo —
+    // a `@` in the path/query/fragment is not a credential.
+    let authority_end = after_scheme
+        .find(['/', '?', '#'])
+        .unwrap_or(after_scheme.len());
+    after_scheme[..authority_end].contains('@')
+}
+
 fn inject_userinfo(url: &str, user: &str, pw: &str) -> String {
-    // Only touches the URL if it has a `scheme://` prefix. Leaves urls that
-    // already carry userinfo alone (assume the caller knows better).
-    if let Some(scheme_end) = url.find("://") {
-        let (scheme, rest) = url.split_at(scheme_end + 3);
-        if rest.contains('@') {
-            return url.to_string();
-        }
-        let user_enc = urlencode(user);
-        let pw_enc = urlencode(pw);
-        format!("{scheme}{user_enc}:{pw_enc}@{rest}")
-    } else {
-        url.to_string()
-    }
+    // Only touches the URL if it has a `scheme://` prefix. Any existing
+    // userinfo in the URL is stripped — the caller supplies the credential
+    // that ends up on the wire. See `resolved_url` for the rationale (issue
+    // #27) and the operator-facing WARN.
+    let Some(scheme_end) = url.find("://") else {
+        return url.to_string();
+    };
+    let (scheme, rest) = url.split_at(scheme_end + 3);
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let (authority, tail) = rest.split_at(authority_end);
+    let host_and_port = match authority.rfind('@') {
+        Some(at) => &authority[at + 1..],
+        None => authority,
+    };
+    let user_enc = urlencode(user);
+    let pw_enc = urlencode(pw);
+    format!("{scheme}{user_enc}:{pw_enc}@{host_and_port}{tail}")
 }
 
 fn urlencode(s: &str) -> String {
@@ -518,15 +553,69 @@ datasources:
     }
 
     #[test]
-    fn inject_userinfo_only_when_absent() {
+    fn inject_userinfo_writes_when_absent() {
         assert_eq!(
             inject_userinfo("postgres://host:5432/db", "u", "p"),
             "postgres://u:p@host:5432/db"
         );
+    }
+
+    #[test]
+    fn inject_userinfo_overrides_existing_userinfo() {
+        // Config-supplied credential wins over URL-embedded userinfo.
+        // Previously (pre-#27) the URL was returned unchanged, silently
+        // defeating `password_env`.
         assert_eq!(
-            inject_userinfo("postgres://already:set@host/db", "u", "p"),
-            "postgres://already:set@host/db"
+            inject_userinfo("postgres://old:stale@host/db", "u", "p"),
+            "postgres://u:p@host/db"
         );
+        // Rotation scenario: URL was edited to a new password, but
+        // password_env was also set. env-supplied password wins.
+        assert_eq!(
+            inject_userinfo("postgres://user:oldpass@host:5432/db", "user", "newpass"),
+            "postgres://user:newpass@host:5432/db"
+        );
+    }
+
+    #[test]
+    fn inject_userinfo_ignores_at_in_path() {
+        // A `@` inside the path is not userinfo; must not be mistaken
+        // for authority. sqlite is a `scheme:` (no `//`) form so it
+        // takes the no-scheme branch — covered separately.
+        assert_eq!(
+            inject_userinfo("postgres://host/db?opt=a@b", "u", "p"),
+            "postgres://u:p@host/db?opt=a@b"
+        );
+    }
+
+    #[test]
+    fn url_has_userinfo_detects_authority_at() {
+        assert!(url_has_userinfo("postgres://u:p@host/db"));
+        assert!(url_has_userinfo("postgres://u@host/db"));
+        assert!(!url_has_userinfo("postgres://host/db"));
+        assert!(!url_has_userinfo("postgres://host/db?opt=a@b"));
+        assert!(!url_has_userinfo("sqlite::memory:"));
+    }
+
+    #[test]
+    fn resolved_url_password_env_beats_url_userinfo() {
+        // Regression for issue #27: setting `password_env` on a
+        // datasource whose URL already carries user:pw@ must produce a
+        // URL that uses the env-supplied password, not the URL's.
+        let key = "RESQL_TEST_ISSUE_27_PW";
+        std::env::set_var(key, "env-secret");
+        let ds = DatasourceConfig {
+            name: "t".into(),
+            url: "postgres://user:url-secret@host:5432/db".into(),
+            username: "user".into(),
+            password_env: key.into(),
+            password: None,
+            max_connections: 1,
+            acquire_timeout_seconds: 1,
+        };
+        let resolved = ds.resolved_url().unwrap();
+        std::env::remove_var(key);
+        assert_eq!(resolved, "postgres://user:env-secret@host:5432/db");
     }
 
     #[test]
