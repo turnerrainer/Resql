@@ -197,3 +197,18 @@ databaseChangeLog:
                 id BIGSERIAL PRIMARY KEY,
                 docs JSONB[] NOT NULL DEFAULT '{}'
               );
+
+  - changeSet:
+      id: 010-enum-table
+      author: rainer
+      changes:
+        - sql:
+            splitStatements: false
+            sql: |
+              CREATE TYPE ticket_priority AS ENUM ('low', 'medium', 'high');
+              CREATE TABLE tickets (
+                id BIGSERIAL PRIMARY KEY,
+                title TEXT NOT NULL,
+                priority ticket_priority NOT NULL,
+                tags ticket_priority[] NOT NULL DEFAULT '{}'
+              );

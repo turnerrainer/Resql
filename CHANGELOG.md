@@ -17,6 +17,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   source of truth. Previous behaviour returned the URL unchanged,
   which turned `password_env` into a decoration and let stale
   URL-embedded passwords silently take effect. Issue #27.
+- **Postgres user-defined `ENUM` columns (and enum arrays) are now
+  auto-coerced to their text label on read.** Previously a bare
+  `SELECT status FROM t` where `status` is a project-defined enum
+  returned JSON `null` — sqlx's built-in `String` decoder isn't
+  compatible with the enum's dynamic OID, so every branch of the row
+  materialiser fell through. Callers had to remember `::text` on every
+  enum SELECT or lose data. The row materialiser now inspects
+  `PgTypeInfo::kind()` and decodes `PgTypeKind::Enum` and
+  `PgTypeKind::Array(Enum)` columns via their raw wire form, since
+  Postgres transmits enum values as UTF-8 labels. Issue #26.
 
 ## [0.2.0-alpha] - 2026-09-06
 

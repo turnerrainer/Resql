@@ -96,3 +96,15 @@ databaseChangeLog:
                 ('2026-07-01', 'APAC',   9876.54),
                 ('2026-07-02', 'EMEA',  13400.00),
                 ('2026-07-02', 'APAC',  10200.00);
+
+  - changeSet:
+      id: fixtures-tickets
+      author: rainer
+      context: test
+      changes:
+        - sql:
+            sql: |
+              INSERT INTO tickets (title, priority, tags) VALUES
+                ('login broken',       'high',   ARRAY['high']::ticket_priority[]),
+                ('typo in docs',       'low',    ARRAY['low', 'medium']::ticket_priority[]),
+                ('perf regression',    'medium', ARRAY[]::ticket_priority[]);
