@@ -444,6 +444,27 @@ async fn batch_body_must_have_queries_field() {
 }
 
 #[tokio::test]
+async fn batch_body_rejects_unknown_top_level_keys() {
+    // Fleet stronghold §2.2 — an attacker sending
+    // {"queries":[...], "attacker_field":true} used to have the extra
+    // key silently dropped. Now it's rejected with MalformedRequest.
+    let app = TestAppBuilder::new()
+        .with_sql("demo/POST/lookup.sql", "SELECT 1 AS n")
+        .build()
+        .await;
+    let (status, code, _msg, _) = app
+        .request_err(
+            "POST",
+            "/demo/lookup/batch",
+            Some(r#"{"queries":[{}],"attacker_field":true}"#),
+            &[],
+        )
+        .await;
+    assert_eq!(status, 400);
+    assert_eq!(code, "MalformedRequestException");
+}
+
+#[tokio::test]
 async fn repeated_named_params_bind_correctly() {
     let app = TestAppBuilder::new()
         .with_sql(
