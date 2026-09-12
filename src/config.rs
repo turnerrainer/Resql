@@ -41,10 +41,43 @@ pub struct Config {
     pub openapi: OpenApiConfig,
     #[serde(default)]
     pub admin: AdminConfig,
+    #[serde(default)]
+    pub security: SecurityConfig,
     /// Diagnostics collected by the compat shim. Populated in
     /// `from_yaml_str`; consumed at boot by `main.rs`. Never serialized.
     #[serde(skip)]
     pub compat_diagnostics: Vec<Diagnostic>,
+}
+
+/// Optional inter-service authentication surface. Default is OFF —
+/// Resql's design is "internal-only, sitting behind Ruuter", and every
+/// enabled flag here documents an intentional deviation from that
+/// posture. See the F-RES-3 finding in the h2ck.me v1 runtime
+/// break-test: a Resql that's ever directly reachable (dev, staging
+/// with a misconfigured proxy, or an unguarded Ruuter DSL) is one
+/// `curl` away from unauth SQL execution against every registered
+/// datasource. This block lets operators opt into a shared-secret
+/// bearer gate for the query endpoints.
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct SecurityConfig {
+    /// Name of the env var whose value is the required inter-service
+    /// bearer token. When set, every request except `/health` and
+    /// `/healthz` MUST carry `Authorization: Bearer <value-of-env-var>`
+    /// or receive 401. Missing env var, empty env-var value, or the
+    /// field left unset all mean "no bearer required" (the default).
+    ///
+    /// Comparison is constant-time on equal-length inputs and length
+    /// mismatch rejects up front — a length side-channel is not
+    /// exploitable because the token length is not a secret; the
+    /// content is.
+    ///
+    /// Design note: the token lives in an env var rather than the YAML
+    /// file itself so the same posture as `password_env` applies —
+    /// secrets never sit in files that end up in image layers or
+    /// backups.
+    #[serde(default)]
+    pub inter_service_token_env: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -344,7 +377,43 @@ impl Config {
                 }
             }
         }
+        // F-RES-3: if the operator wired a bearer-gate env var name,
+        // fail fast at boot if the env var is missing or empty. The
+        // failure mode we want to avoid is a config that names an env
+        // var, the operator forgets to set it, and the service silently
+        // boots with the gate disabled — matching the pre-fix posture
+        // rather than the intended locked-down one.
+        if !self.security.inter_service_token_env.is_empty() {
+            let key = &self.security.inter_service_token_env;
+            match std::env::var(key) {
+                Err(_) => {
+                    return Err(ResqlError::Internal(format!(
+                        "security.inter_service_token_env references env var {key} which is not set"
+                    )));
+                }
+                Ok(v) if v.is_empty() => {
+                    return Err(ResqlError::Internal(format!(
+                        "security.inter_service_token_env references env var {key} but its value is empty"
+                    )));
+                }
+                Ok(_) => {}
+            }
+        }
         Ok(())
+    }
+
+    /// Resolve the configured bearer token from its env var, or
+    /// `None` if the gate is not enabled. Called by the auth
+    /// middleware on every request — the env-var value is cached in
+    /// the AppState so we don't hit `getenv` per request.
+    pub fn resolved_inter_service_token(&self) -> Option<String> {
+        if self.security.inter_service_token_env.is_empty() {
+            return None;
+        }
+        match std::env::var(&self.security.inter_service_token_env) {
+            Ok(v) if !v.is_empty() => Some(v),
+            _ => None,
+        }
     }
 
     /// Resolve project → datasource name using the map, falling back to project name.
@@ -622,6 +691,47 @@ datasources:
     fn urlencode_percent_encodes_special_chars() {
         assert_eq!(urlencode("p@ss w/ord!"), "p%40ss%20w%2Ford%21");
         assert_eq!(urlencode("simple"), "simple");
+    }
+
+    #[test]
+    fn inter_service_token_env_missing_var_rejected_at_boot() {
+        // F-RES-3: an operator who wires the config but forgets the env
+        // var must fail loud at boot — silent-fallback to "no bearer
+        // required" is the pre-fix posture we're closing.
+        let key = "RESQL_TEST_TOKEN_MUST_NOT_EXIST";
+        std::env::remove_var(key);
+        let yaml = format!("sql_dir: ./sql\nsecurity:\n  inter_service_token_env: \"{key}\"\n");
+        let err = Config::from_yaml_str(&yaml).unwrap_err();
+        assert!(err.to_string().contains(key), "err = {err:?}");
+    }
+
+    #[test]
+    fn inter_service_token_env_empty_value_rejected_at_boot() {
+        let key = "RESQL_TEST_TOKEN_EMPTY";
+        std::env::set_var(key, "");
+        let yaml = format!("sql_dir: ./sql\nsecurity:\n  inter_service_token_env: \"{key}\"\n");
+        let err = Config::from_yaml_str(&yaml).unwrap_err();
+        std::env::remove_var(key);
+        assert!(err.to_string().contains("empty"), "err = {err:?}");
+    }
+
+    #[test]
+    fn resolved_inter_service_token_reads_env() {
+        let key = "RESQL_TEST_TOKEN_OK";
+        std::env::set_var(key, "s3cret");
+        let yaml = format!("sql_dir: ./sql\nsecurity:\n  inter_service_token_env: \"{key}\"\n");
+        let cfg = Config::from_yaml_str(&yaml).unwrap();
+        assert_eq!(
+            cfg.resolved_inter_service_token().as_deref(),
+            Some("s3cret")
+        );
+        std::env::remove_var(key);
+    }
+
+    #[test]
+    fn resolved_inter_service_token_none_when_unset() {
+        let cfg = Config::from_yaml_str("sql_dir: ./sql\n").unwrap();
+        assert!(cfg.resolved_inter_service_token().is_none());
     }
 
     #[test]

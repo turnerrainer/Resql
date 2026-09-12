@@ -35,6 +35,10 @@ pub struct AppState {
     /// Cached because the declaration set is fixed for the process
     /// lifetime and building it per request would be wasteful.
     pub openapi: Arc<Value>,
+    /// The resolved inter-service bearer token (F-RES-3), cached at
+    /// boot from `security.inter_service_token_env` so the auth
+    /// middleware doesn't `getenv` per request. `None` = gate disabled.
+    pub inter_service_token: Arc<Option<String>>,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -42,6 +46,7 @@ pub fn router(state: AppState) -> Router {
     let body_limit = state.config.server.max_body_bytes;
     let timeout = Duration::from_secs(state.config.server.request_timeout_seconds);
     let logging_for_layer = state.config.logging.clone();
+    let bearer_for_layer = state.inter_service_token.clone();
 
     let mut router = Router::new()
         .route("/health", get(health_handler))
@@ -75,11 +80,77 @@ pub fn router(state: AppState) -> Router {
             timeout,
         ))
         .layer(RequestBodyLimitLayer::new(body_limit))
+        // F-RES-3: optional shared-secret bearer gate. When enabled it
+        // sits INSIDE the observability middleware (so the access log
+        // still fires for 401s) but OUTSIDE the timeout / body-limit
+        // layers (so an unauth request never occupies a pool slot or
+        // pays wall-clock time for a big body). Health probes bypass.
+        .layer(middleware::from_fn(move |req, next| {
+            let token = bearer_for_layer.clone();
+            require_inter_service_bearer(token, req, next)
+        }))
         .layer(middleware::from_fn(move |req, next| {
             let cfg = logging_for_layer.clone();
             request_observability(cfg, req, next)
         }))
         .with_state(state)
+}
+
+/// F-RES-3 middleware. When a bearer token is configured, every
+/// request except `/health` and `/healthz` MUST carry a matching
+/// `Authorization: Bearer <token>` header — constant-time
+/// comparison, no substring / prefix matches, no length side-channel
+/// beyond the token length itself (public — the header name reveals
+/// nothing). When the token is not configured, this middleware is a
+/// pass-through so the default posture is unchanged (internal-only
+/// service behind Ruuter).
+async fn require_inter_service_bearer(
+    expected: Arc<Option<String>>,
+    req: Request,
+    next: Next,
+) -> Response {
+    let Some(expected) = expected.as_ref() else {
+        return next.run(req).await;
+    };
+    let path = req.uri().path();
+    if path == HEALTH_PATH || path == HEALTHZ_PATH {
+        return next.run(req).await;
+    }
+    let provided = req
+        .headers()
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .unwrap_or("");
+    if !constant_time_eq(provided.as_bytes(), expected.as_bytes()) {
+        // FLEET-STRONGHOLDS §1.4: never echo the attempted token
+        // content — the WARN is structured with only the failure
+        // kind. Log once per rejection so operators still see the
+        // audit trail; downstream envelope-reshape middleware will
+        // convert the 401 into the header envelope shape.
+        tracing::warn!(
+            error.kind = "UnauthorizedException",
+            "inter-service bearer check failed"
+        );
+        return ResqlError::Unauthorized.into_response();
+    }
+    next.run(req).await
+}
+
+/// Constant-time byte-slice equality on the shorter of the two
+/// lengths. Length mismatch rejects up front — token length is not a
+/// secret; the content is. Returns `false` immediately for
+/// unequal-length inputs so a caller can't feed a very long "guess"
+/// and observe a length-proportional runtime hint.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff: u8 = 0;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
 const TRACEPARENT_HEADER: &str = "traceparent";
@@ -488,12 +559,14 @@ pub async fn init(config: Config) -> Result<AppState, ResqlError> {
     )
     .await?;
     let spec = openapi::build_spec(&index, &config.openapi);
+    let bearer = Arc::new(config.resolved_inter_service_token());
     Ok(AppState {
         config: Arc::new(config),
         index: Arc::new(index),
         registry: Arc::new(registry),
         start: StartTime::now(),
         openapi: Arc::new(spec),
+        inter_service_token: bearer,
     })
 }
 
