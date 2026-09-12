@@ -6,6 +6,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added (fleet stronghold §8.2)
+
+- **`resql doctor` — pre-boot health check subcommand.** Parses the
+  config, runs the same safety checks `serve` runs (semantic
+  validation + `validate_runtime_posture` from fleet §3.1), and prints
+  compat-shim diagnostics in the same order they'd land in the boot
+  log. Never binds a port, never opens a datasource pool — deliberately
+  side-effect-free so ops teams can point it at a candidate config in
+  staging without disturbing anything. Exit-code contract: 0 = clean,
+  1 = hard error (parse failure or runtime-posture refuse), 2 =
+  warnings only with `--strict`. Wire into CI as a blocking gate
+  (`--strict`) or a non-blocking check (default). The `Command`
+  wrapper defaults to `serve` when no subcommand is given, so existing
+  invocations of `resql -c resql.yaml` still work unchanged.
+
 ### Added (fleet stronghold §3.1)
 
 - **Boot refuses to start on a non-loopback bind without an
