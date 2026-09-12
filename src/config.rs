@@ -78,6 +78,23 @@ pub struct SecurityConfig {
     /// backups.
     #[serde(default)]
     pub inter_service_token_env: String,
+    /// Opt-out for the boot-time refuse-on-non-loopback check (fleet
+    /// stronghold §3.1). By default, if `server.bind` is a non-loopback
+    /// address AND no bearer gate is configured, boot fails with an
+    /// actionable message — the "public bind, no auth" posture is the
+    /// exact shape F-RES-3 was filed against and there is no reason to
+    /// start a service in that state without a conscious operator
+    /// decision.
+    ///
+    /// Set to `true` when a reverse proxy (Ruuter in Bürokratt, or an
+    /// nginx / Traefik / Envoy in front) authenticates every request
+    /// before it reaches Resql. That's the standard delegate-auth
+    /// posture — Resql sees only pre-authenticated traffic and can
+    /// safely bind to a non-loopback address. When the proxy is missing
+    /// (dev without Ruuter; container exposed directly), leave this
+    /// false and configure `inter_service_token_env` instead.
+    #[serde(default)]
+    pub trust_network: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -402,6 +419,44 @@ impl Config {
         Ok(())
     }
 
+    /// Runtime-posture check separate from the semantic `validate()`.
+    /// `validate()` covers field shapes and cross-references — anything
+    /// a parser needs to succeed. This method covers the deployment
+    /// posture the operator is starting the process into. Called from
+    /// `main.rs` before any listener binds; not called from
+    /// `from_yaml_str` so that a compat-shim or fixture parse works
+    /// even on a config whose bind posture would refuse to boot.
+    ///
+    /// Fleet stronghold §3.1: refuse to start on a non-loopback bind
+    /// that has no authentication story. The three ways to satisfy
+    /// this check are:
+    ///   (a) bind to loopback (127.0.0.1 / ::1 / localhost) and let a
+    ///       reverse proxy forward to it,
+    ///   (b) enable the built-in bearer gate via
+    ///       `security.inter_service_token_env`,
+    ///   (c) set `security.trust_network: true` to certify that a
+    ///       reverse proxy already authenticates every request.
+    /// Any other posture is one HTTP request away from unauth SQL
+    /// execution — the exact F-RES-3 shape — and starting the service
+    /// silently is a worse operator experience than a loud, actionable
+    /// boot failure.
+    pub fn validate_runtime_posture(&self) -> Result<(), ResqlError> {
+        if is_non_loopback_bind(&self.server.bind)
+            && self.security.inter_service_token_env.is_empty()
+            && !self.security.trust_network
+        {
+            return Err(ResqlError::Internal(format!(
+                "refusing to start on non-loopback bind {bind} without an authentication story. \
+                 Do one of: (a) bind to 127.0.0.1:<port> and let a reverse proxy forward, \
+                 (b) set security.inter_service_token_env to enable the built-in bearer gate, \
+                 or (c) set security.trust_network: true to certify that a reverse proxy \
+                 authenticates every request before it reaches Resql.",
+                bind = self.server.bind
+            )));
+        }
+        Ok(())
+    }
+
     /// Resolve the configured bearer token from its env var, or
     /// `None` if the gate is not enabled. Called by the auth
     /// middleware on every request — the env-var value is cached in
@@ -423,6 +478,27 @@ impl Config {
             .cloned()
             .unwrap_or_else(|| project.to_string())
     }
+}
+
+/// True when `bind` is not a loopback / localhost address. Handles the
+/// three shapes an operator is likely to write: `0.0.0.0:PORT`,
+/// `[::]:PORT`, and `HOST:PORT` where HOST is a hostname or public IP.
+/// Loopback bindings (`127.0.0.1`, `::1`, `localhost`) return `false`.
+/// See fleet stronghold §3.1 for why boot refuses on non-loopback
+/// without an auth story.
+fn is_non_loopback_bind(bind: &str) -> bool {
+    let host = if let Some(stripped) = bind.strip_prefix('[') {
+        match stripped.find(']') {
+            Some(end) => &stripped[..end],
+            None => bind,
+        }
+    } else {
+        match bind.rfind(':') {
+            Some(idx) => &bind[..idx],
+            None => bind,
+        }
+    };
+    !matches!(host, "127.0.0.1" | "::1" | "localhost")
 }
 
 impl DatasourceConfig {
@@ -520,7 +596,16 @@ mod tests {
 
     #[test]
     fn defaults_when_only_sql_dir_specified() {
-        let cfg = Config::from_yaml_str("sql_dir: ./sql\n").unwrap();
+        // Fleet stronghold §3.1: the default `server.bind` (0.0.0.0:8080)
+        // now trips the boot-refuse check. Set `trust_network: true` to
+        // certify the delegate-auth posture so this test focuses on the
+        // remaining defaults rather than the auth-story check.
+        let yaml = r#"
+sql_dir: ./sql
+security:
+  trust_network: true
+"#;
+        let cfg = Config::from_yaml_str(yaml).unwrap();
         assert_eq!(cfg.server.bind, "0.0.0.0:8080");
         assert_eq!(cfg.server.max_body_bytes, 1_048_576);
         assert!(
@@ -602,7 +687,9 @@ datasources:
 
     #[test]
     fn datasource_for_project_defaults_to_project_name() {
-        let cfg = Config::from_yaml_str("sql_dir: ./sql\n").unwrap();
+        // Loopback bind → skip the fleet §3.1 boot-refuse check.
+        let cfg =
+            Config::from_yaml_str("sql_dir: ./sql\nserver:\n  bind: \"127.0.0.1:8080\"\n").unwrap();
         assert_eq!(cfg.datasource_for_project("crm"), "crm");
     }
 
@@ -610,6 +697,8 @@ datasources:
     fn datasource_for_project_uses_map() {
         let yaml = r#"
 sql_dir: ./sql
+server:
+  bind: "127.0.0.1:8080"
 project_datasource_map:
   crm: db1
 datasources:
@@ -730,8 +819,61 @@ datasources:
 
     #[test]
     fn resolved_inter_service_token_none_when_unset() {
-        let cfg = Config::from_yaml_str("sql_dir: ./sql\n").unwrap();
+        // Default bind (0.0.0.0:8080) trips the fleet §3.1 refuse-check,
+        // so pin the bind to loopback so this test focuses on the
+        // resolved-token behaviour and not the boot-refuse posture.
+        let cfg =
+            Config::from_yaml_str("sql_dir: ./sql\nserver:\n  bind: \"127.0.0.1:8080\"\n").unwrap();
         assert!(cfg.resolved_inter_service_token().is_none());
+    }
+
+    #[test]
+    fn runtime_posture_refuses_non_loopback_without_auth() {
+        // Fleet stronghold §3.1: bind 0.0.0.0:8080 with no bearer +
+        // no `trust_network` opt-in is the F-RES-3 shape. Semantic
+        // parse succeeds (so a compat-shim reload still works); the
+        // runtime-posture check is what refuses to boot.
+        let yaml = "sql_dir: ./sql\nserver:\n  bind: \"0.0.0.0:8080\"\n";
+        let cfg = Config::from_yaml_str(yaml).unwrap();
+        let err = cfg.validate_runtime_posture().unwrap_err();
+        let m = err.to_string();
+        assert!(m.contains("non-loopback bind"), "err = {m}");
+        assert!(m.contains("127.0.0.1"), "err = {m}");
+        assert!(m.contains("inter_service_token_env"), "err = {m}");
+        assert!(m.contains("trust_network"), "err = {m}");
+    }
+
+    #[test]
+    fn runtime_posture_accepts_non_loopback_with_bearer_gate() {
+        let key = "RESQL_TEST_FLEET_3_1_TOKEN";
+        std::env::set_var(key, "secret");
+        let yaml = format!(
+            "sql_dir: ./sql\nserver:\n  bind: \"0.0.0.0:8080\"\nsecurity:\n  inter_service_token_env: \"{key}\"\n"
+        );
+        let cfg = Config::from_yaml_str(&yaml).unwrap();
+        let ok = cfg.validate_runtime_posture();
+        std::env::remove_var(key);
+        assert!(ok.is_ok(), "err = {:?}", ok.err());
+    }
+
+    #[test]
+    fn runtime_posture_accepts_non_loopback_with_trust_network() {
+        let yaml =
+            "sql_dir: ./sql\nserver:\n  bind: \"0.0.0.0:8080\"\nsecurity:\n  trust_network: true\n";
+        let cfg = Config::from_yaml_str(yaml).unwrap();
+        assert!(cfg.validate_runtime_posture().is_ok());
+    }
+
+    #[test]
+    fn runtime_posture_accepts_loopback_without_auth() {
+        for yaml in [
+            "sql_dir: ./sql\nserver:\n  bind: \"127.0.0.1:8080\"\n",
+            "sql_dir: ./sql\nserver:\n  bind: \"[::1]:8080\"\n",
+            "sql_dir: ./sql\nserver:\n  bind: \"localhost:8080\"\n",
+        ] {
+            let cfg = Config::from_yaml_str(yaml).unwrap();
+            assert!(cfg.validate_runtime_posture().is_ok(), "yaml = {yaml}");
+        }
     }
 
     #[test]

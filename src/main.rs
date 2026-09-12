@@ -71,6 +71,13 @@ async fn main() -> Result<()> {
         }
     }
 
+    // Fleet stronghold §3.1: fail fast before we bind a public
+    // interface with no authentication story. `validate()` handles
+    // semantic checks; this method covers the deployment posture and
+    // is intentionally separate so a compat-shim parse still works.
+    cfg.validate_runtime_posture()
+        .context("boot-time security-posture check")?;
+
     info!(
         version = env!("CARGO_PKG_VERSION"),
         config = %config_path.display(),

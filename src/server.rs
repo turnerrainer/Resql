@@ -596,9 +596,13 @@ mod tests {
         assert_eq!(redact_url("sqlite:/var/lib/resql/audit.db"), "sqlite:");
     }
 
+    // All server tests below bind to loopback to satisfy fleet §3.1's
+    // boot-refuse check; the check itself is exercised in `config::tests`.
+    const LOOPBACK_HEADER: &str = "sql_dir: ./sql\nserver:\n  bind: \"127.0.0.1:8080\"\n";
+
     #[test]
     fn choose_datasource_defaults_to_project_name() {
-        let cfg = Config::from_yaml_str("sql_dir: ./sql\n").unwrap();
+        let cfg = Config::from_yaml_str(LOOPBACK_HEADER).unwrap();
         let headers = HeaderMap::new();
         assert_eq!(choose_datasource(&cfg, "crm", &headers).unwrap(), "crm");
     }
@@ -607,6 +611,8 @@ mod tests {
     fn choose_datasource_respects_header_when_allowed_and_allowlisted() {
         let yaml = r#"
 sql_dir: ./sql
+server:
+  bind: "127.0.0.1:8080"
 allow_datasource_header: true
 datasource_header_allowlist:
   crm: [other]
@@ -622,8 +628,10 @@ datasources:
 
     #[test]
     fn choose_datasource_ignores_header_when_disabled() {
-        let cfg =
-            Config::from_yaml_str("sql_dir: ./sql\nallow_datasource_header: false\n").unwrap();
+        let cfg = Config::from_yaml_str(&format!(
+            "{LOOPBACK_HEADER}allow_datasource_header: false\n"
+        ))
+        .unwrap();
         let mut headers = HeaderMap::new();
         headers.insert(DATASOURCE_HEADER, HeaderValue::from_static("other"));
         assert_eq!(choose_datasource(&cfg, "crm", &headers).unwrap(), "crm");
@@ -633,6 +641,8 @@ datasources:
     fn choose_datasource_map_takes_precedence_over_default() {
         let yaml = r#"
 sql_dir: ./sql
+server:
+  bind: "127.0.0.1:8080"
 project_datasource_map:
   crm: db1
 datasources:
@@ -650,6 +660,8 @@ datasources:
         // project → header override is refused (R1).
         let yaml = r#"
 sql_dir: ./sql
+server:
+  bind: "127.0.0.1:8080"
 allow_datasource_header: true
 datasources:
   - name: db1
@@ -669,6 +681,8 @@ datasources:
     fn choose_datasource_header_rejected_when_not_in_allowlist() {
         let yaml = r#"
 sql_dir: ./sql
+server:
+  bind: "127.0.0.1:8080"
 allow_datasource_header: true
 datasource_header_allowlist:
   crm: [db1]
@@ -693,6 +707,8 @@ datasources:
         // A blank/whitespace-only header value is treated as absent.
         let yaml = r#"
 sql_dir: ./sql
+server:
+  bind: "127.0.0.1:8080"
 allow_datasource_header: true
 datasources:
   - name: crm
