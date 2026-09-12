@@ -18,6 +18,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Operators who need the spec (dev, staging, or behind a same-origin
   reverse proxy that authenticates before it hits Resql) set
   `admin.openapi_public: true`. FN3.
+- **413 (body too large) and 504 (request timeout) responses now use
+  the same header-envelope shape as every other error.** The two
+  layers `tower-http` provides — `RequestBodyLimitLayer` and
+  `TimeoutLayer` — emit their responses outside the router, so they
+  previously bypassed the ResqlError envelope: 413 was bare
+  `text/plain` "length limit exceeded", 504 was an empty body without
+  the two `X-Resql-Error-*` headers. Downstream DSLs had to
+  special-case those two paths. A new outer middleware reshapes any
+  non-2xx response missing `X-Resql-Error-Code` into the canonical
+  envelope: body swapped to `[]`, headers set to
+  `PayloadTooLargeException` / `RequestTimeoutException` (or the
+  status's canonical name for other 4xx/5xx cases). Idempotent —
+  ResqlError responses already carry the envelope and are untouched.
+  FN5.
 
 ### Added (fleet stronghold §8.2)
 

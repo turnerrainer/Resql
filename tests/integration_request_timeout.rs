@@ -28,9 +28,9 @@ async fn slow_query_hits_request_timeout() {
     // Outer safety net: if the timeout wiring is broken, the recursive
     // CTE would potentially run for minutes. Cap the wait so the test
     // suite can't hang.
-    let (status, _body) = tokio::time::timeout(
+    let (status, code, _message, body) = tokio::time::timeout(
         Duration::from_secs(20),
-        app.request("POST", "/demo/slow", Some("{}"), &[]),
+        app.request_err("POST", "/demo/slow", Some("{}"), &[]),
     )
     .await
     .expect("request should complete within the outer safety timeout");
@@ -43,6 +43,10 @@ async fn slow_query_hits_request_timeout() {
         status == 408 || status == 504,
         "expected 408/504 timeout status, got {status} after {elapsed:?}"
     );
+    // FN5: 504 from the tower-http TimeoutLayer now carries the
+    // header-envelope shape, same as any other error path.
+    assert_eq!(code, "RequestTimeoutException");
+    assert_eq!(body, serde_json::json!([]));
     assert!(
         elapsed >= Duration::from_millis(900),
         "elapsed {elapsed:?} — timeout fired earlier than the configured 1s"
