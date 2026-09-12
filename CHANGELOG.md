@@ -6,6 +6,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security (v1 runtime break-test — h2ck.me)
+
+- **Shipped `docker-compose.yml` now runs with `read_only: true`.** The
+  container rootfs is immutable — combined with the existing
+  `cap_drop: ALL` and `no-new-privileges` the compose file already set,
+  an RCE inside the resql process can no longer drop a payload
+  anywhere on disk. Previously `read_only` was commented out with a
+  note about SQLite needing to write to its DB file; the in-memory demo
+  doesn't need that, and file-backed SQLite users are now pointed at
+  the volume-mount pattern (write only to `/var/lib/resql/data`) so the
+  rest of the filesystem stays sealed. FN4.
+
 ## [0.3.0-alpha] - 2026-09-10
 
 **Minor bump because the error-response wire shape changed.** Configs

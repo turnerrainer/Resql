@@ -23,7 +23,21 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
+    # Immutable rootfs: the container can only write to explicitly-mounted
+    # volumes. Combined with `no-new-privileges` and `cap_drop:ALL`, this
+    # closes the FN4 finding — an RCE in the resql process cannot drop a
+    # payload anywhere on the container's filesystem. If you use
+    # file-backed SQLite instead of the in-memory demo, mount the data
+    # directory explicitly (writable) so SQLite still has somewhere to
+    # write WAL / journal files, e.g.:
+    #   volumes:
+    #     - ./sqlite-data:/var/lib/resql/data
+    # and point your `resql.yaml` datasource URL at
+    # `sqlite:/var/lib/resql/data/resql.db`.
+    read_only: true
     tmpfs:
+      # Writable scratch for /tmp (matches the compose defaults so
+      # everything Rust's default temp-file APIs need still works).
       - /tmp:size=64M
     deploy:
       resources:
@@ -33,6 +47,3 @@ services:
         reservations:
           cpus: "0.25"
           memory: 128M
-    # read_only stays disabled by default: SQLite may need to write to its
-    # database file. Enable if you point exclusively at remote datasources.
-    # read_only: true
