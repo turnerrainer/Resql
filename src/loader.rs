@@ -99,6 +99,23 @@ impl QueryIndex {
         self.inner.values()
     }
 
+    /// Enumerate HTTP methods for which a saved query exists at
+    /// `(project, path)`. Used by the dispatcher (FN6) to distinguish
+    /// "route exists but under a different method" (→ 405 with `Allow`)
+    /// from "no such saved query" (→ 400 QueryNotFound). Result is
+    /// deterministic (GET before POST) so the emitted `Allow:` header
+    /// value is stable across restarts.
+    pub fn allowed_methods_for(&self, project: &str, path: &str) -> Vec<HttpMethod> {
+        let key = normalise(project, path);
+        let mut out = Vec::new();
+        for m in [HttpMethod::Get, HttpMethod::Post] {
+            if self.inner.contains_key(&(m, key.clone())) {
+                out.push(m);
+            }
+        }
+        out
+    }
+
     pub(crate) fn insert(&mut self, q: SavedQuery) -> Result<(), ResqlError> {
         let key = (q.method, normalise(&q.project, &q.path));
         if let Some(existing) = self.inner.get(&key) {

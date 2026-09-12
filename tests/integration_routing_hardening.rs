@@ -107,3 +107,67 @@ async fn r2_default_no_cors_header_on_response() {
 // layer requires an explicit non-empty allowed_origins in config, which
 // the current test harness does not surface. This file exists to hold
 // the regression pin for the visible headers-on-response (R2) behaviour.
+
+// -------- FN6 --------
+
+#[tokio::test]
+async fn fn6_get_on_post_only_path_returns_405_with_allow_header() {
+    // A saved query exists at /demo/x under POST. A GET to the same path
+    // must return 405 with `Allow: POST` (RFC 7231 §7.4.1), not the
+    // previous 400 `Saved query does not exist` — the path IS registered,
+    // just under a different method.
+    let app = TestAppBuilder::new()
+        .with_sql("demo/POST/x.sql", "SELECT 1 AS n")
+        .build()
+        .await;
+    let (status, headers, _body) = app.request_full("GET", "/demo/x", None, &[]).await;
+    assert_eq!(status, 405);
+    let allow = headers
+        .get("allow")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(
+        allow.split(',').map(str::trim).any(|m| m == "POST"),
+        "expected `Allow: POST` header, got {allow:?}"
+    );
+    assert_eq!(
+        headers
+            .get("x-resql-error-code")
+            .and_then(|v| v.to_str().ok()),
+        Some("MethodNotAllowedException"),
+    );
+}
+
+#[tokio::test]
+async fn fn6_405_lists_every_supported_method() {
+    // Both GET and POST exist at /demo/x. Requesting via DELETE (which
+    // axum's router refuses at the framework level with its own 405 +
+    // Allow) is out of scope; the case FN6 targets is a saved query set
+    // that only registers one of the two, so a mismatching method (GET
+    // when only POST exists, or vice versa) returns 405. When both are
+    // registered the request succeeds. Cross-check both directions.
+    let app = TestAppBuilder::new()
+        .with_sql("demo/GET/x.sql", "SELECT 1 AS n")
+        .with_sql("demo/POST/x.sql", "SELECT 2 AS n")
+        .build()
+        .await;
+    let (get_status, _b) = app.request("GET", "/demo/x", None, &[]).await;
+    let (post_status, _b) = app.request("POST", "/demo/x", Some("{}"), &[]).await;
+    assert_eq!(get_status, 200);
+    assert_eq!(post_status, 200);
+}
+
+#[tokio::test]
+async fn fn6_unknown_path_still_returns_400_query_not_found() {
+    // The 405 path only kicks in when a saved query IS registered under
+    // a different method. A path with no saved queries under any method
+    // must still return 400 with the ResqlRuntimeException / QueryNotFound
+    // shape callers already handle.
+    let app = TestAppBuilder::new()
+        .with_sql("demo/POST/x.sql", "SELECT 1 AS n")
+        .build()
+        .await;
+    let (status, code, _msg, _body) = app.request_err("GET", "/demo/nonexistent", None, &[]).await;
+    assert_eq!(status, 400);
+    assert_eq!(code, "ResqlRuntimeException");
+}

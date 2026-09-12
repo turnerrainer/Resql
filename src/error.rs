@@ -84,6 +84,15 @@ pub enum ResqlError {
     /// "sent a token". F-RES-3.
     #[error("Authentication required")]
     Unauthorized,
+
+    /// A saved query exists at the requested path but only under a
+    /// different HTTP method. Returned by the dispatcher as `405 Method
+    /// Not Allowed` with an `Allow:` header listing the supported
+    /// methods, per RFC 7231 §7.4.1. Previously such requests returned
+    /// 400 `Saved query '<path>' does not exist`, which is misleading
+    /// — the path IS registered, just under a different method (FN6).
+    #[error("Method not allowed for '{path}' — try {allowed}")]
+    MethodNotAllowed { path: String, allowed: String },
 }
 
 impl ResqlError {
@@ -107,6 +116,7 @@ impl ResqlError {
             }
             ResqlError::BatchStatementFailed { .. } => "BadSqlGrammarException",
             ResqlError::Unauthorized => "UnauthorizedException",
+            ResqlError::MethodNotAllowed { .. } => "MethodNotAllowedException",
         }
     }
 
@@ -116,6 +126,7 @@ impl ResqlError {
             ResqlError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
             ResqlError::ForbiddenDatasourceOverride { .. } => StatusCode::FORBIDDEN,
             ResqlError::Unauthorized => StatusCode::UNAUTHORIZED,
+            ResqlError::MethodNotAllowed { .. } => StatusCode::METHOD_NOT_ALLOWED,
             _ => StatusCode::BAD_REQUEST,
         }
     }
@@ -151,6 +162,10 @@ impl IntoResponse for ResqlError {
         // no longer routes to a "not_found" branch by silently having
         // an object body whose `.length` is `undefined`. Structured
         // error info moves to the two response headers below. See #25.
+        let allow_hint = match &self {
+            ResqlError::MethodNotAllowed { allowed, .. } => Some(allowed.clone()),
+            _ => None,
+        };
         let mut resp = (status, Json(Value::Array(Vec::new()))).into_response();
         let headers = resp.headers_mut();
         if let Ok(v) = HeaderValue::from_str(kind) {
@@ -158,6 +173,13 @@ impl IntoResponse for ResqlError {
         }
         if let Ok(v) = HeaderValue::from_str(&sanitize_header_value(&message)) {
             headers.insert(HeaderName::from_static(ERROR_MESSAGE_HEADER), v);
+        }
+        // RFC 7231 §7.4.1: a 405 response MUST include an `Allow:`
+        // header listing the methods the resource does support.
+        if let Some(allow) = allow_hint {
+            if let Ok(v) = HeaderValue::from_str(&allow) {
+                headers.insert(axum::http::header::ALLOW, v);
+            }
         }
         resp
     }
