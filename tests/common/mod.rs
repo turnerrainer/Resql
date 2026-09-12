@@ -39,6 +39,11 @@ pub struct TestAppBuilder {
     max_body: usize,
     datasources_public: bool,
     request_timeout_secs: u64,
+    /// F-RES-3: when set, the built app enables the inter-service
+    /// bearer gate with this token as the expected secret. Tests that
+    /// need to prove the gate flip a specific value here; the default
+    /// (`None`) leaves the gate disabled and matches production.
+    inter_service_token: Option<String>,
 }
 
 impl TestAppBuilder {
@@ -55,7 +60,16 @@ impl TestAppBuilder {
             // production posture is off.
             datasources_public: true,
             request_timeout_secs: 30,
+            inter_service_token: None,
         }
+    }
+
+    /// Enable the F-RES-3 bearer gate with the given token. Tests
+    /// that exercise the gate call this; the default (unset) leaves
+    /// the gate disabled and matches production posture.
+    pub fn inter_service_token(mut self, token: &str) -> Self {
+        self.inter_service_token = Some(token.into());
+        self
     }
 
     /// Toggle whether the `/datasources` endpoint returns data (true)
@@ -229,16 +243,19 @@ impl TestAppBuilder {
             admin: resql::config::AdminConfig {
                 datasources_public: self.datasources_public,
             },
+            security: resql::config::SecurityConfig::default(),
             compat_diagnostics: Vec::new(),
         };
 
         let spec = resql::openapi::build_spec(&index, &config.openapi);
+        let bearer = Arc::new(self.inter_service_token.clone());
         let state = AppState {
             config: Arc::new(config),
             index: Arc::new(index),
             registry: Arc::new(registry),
             start: StartTime::now(),
             openapi: Arc::new(spec),
+            inter_service_token: bearer,
         };
 
         let router = server::router(state);

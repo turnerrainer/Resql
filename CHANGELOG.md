@@ -6,6 +6,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added (v1 runtime break-test — h2ck.me)
+
+- **Optional inter-service bearer gate.** New config field
+  `security.inter_service_token_env: <ENV_VAR_NAME>`. When set, the
+  named env var's value becomes the required `Authorization: Bearer …`
+  token for every request except `/health` and `/healthz`; missing or
+  mismatched tokens return 401 `UnauthorizedException` with the
+  canonical header-envelope shape. Token comparison is constant-time on
+  equal-length inputs (length mismatch rejects up-front — token length
+  is not a secret). Boot refuses to start if the env var is unset or
+  empty, so a wired-but-unset gate can't silently disable itself. The
+  gate is OFF by default — Resql's design is "internal-only behind
+  Ruuter" and operators must opt in per deployment. Closes the F-RES-3
+  finding: a Resql that becomes network-reachable outside its intended
+  trust boundary (dev, staging with a misconfigured proxy, or an
+  unguarded Ruuter DSL) is no longer one `curl` away from unauth SQL
+  execution against every registered datasource.
+
 ## [0.3.0-alpha] - 2026-09-10
 
 **Minor bump because the error-response wire shape changed.** Configs
