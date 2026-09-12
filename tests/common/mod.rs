@@ -45,6 +45,10 @@ pub struct TestAppBuilder {
     /// need to prove the gate flip a specific value here; the default
     /// (`None`) leaves the gate disabled and matches production.
     inter_service_token: Option<String>,
+    /// R8: optional rate-limiter setting for tests that exercise the
+    /// bucket. (rps, burst); rps=0 leaves the middleware disabled
+    /// (default posture; every existing integration test uses this).
+    rate_limit: (u32, u32),
 }
 
 impl TestAppBuilder {
@@ -67,6 +71,7 @@ impl TestAppBuilder {
             openapi_public: true,
             request_timeout_secs: 30,
             inter_service_token: None,
+            rate_limit: (0, 0),
         }
     }
 
@@ -75,6 +80,13 @@ impl TestAppBuilder {
     /// the gate disabled and matches production posture.
     pub fn inter_service_token(mut self, token: &str) -> Self {
         self.inter_service_token = Some(token.into());
+        self
+    }
+
+    /// Set the R8 rate limiter for this test app. `(rps, burst)`; rps=0
+    /// leaves the middleware disabled (default posture).
+    pub fn rate_limit(mut self, rps: u32, burst: u32) -> Self {
+        self.rate_limit = (rps, burst);
         self
     }
 
@@ -258,11 +270,23 @@ impl TestAppBuilder {
                 openapi_public: self.openapi_public,
             },
             security: resql::config::SecurityConfig::default(),
+            rate_limit: resql::config::RateLimitConfig {
+                requests_per_second: self.rate_limit.0,
+                burst: self.rate_limit.1,
+            },
             compat_diagnostics: Vec::new(),
         };
 
         let spec = resql::openapi::build_spec(&index, &config.openapi);
         let bearer = Arc::new(self.inter_service_token.clone());
+        let rate_limiter = if config.rate_limit.requests_per_second > 0 {
+            Some(resql::server::RateLimiter::new(
+                config.rate_limit.requests_per_second,
+                config.effective_rate_limit_burst(),
+            ))
+        } else {
+            None
+        };
         let state = AppState {
             config: Arc::new(config),
             index: Arc::new(index),
@@ -270,6 +294,7 @@ impl TestAppBuilder {
             start: StartTime::now(),
             openapi: Arc::new(spec),
             inter_service_token: bearer,
+            rate_limiter: Arc::new(rate_limiter),
         };
 
         let router = server::router(state);

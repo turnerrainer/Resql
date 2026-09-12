@@ -105,6 +105,12 @@ pub enum ResqlError {
     /// — the path IS registered, just under a different method (FN6).
     #[error("Method not allowed for '{path}' — try {allowed}")]
     MethodNotAllowed { path: String, allowed: String },
+
+    /// R8: rate-limit bucket exhausted. Caller-visible message tells
+    /// them when to retry; the same value goes into the `Retry-After`
+    /// response header (see server::rate_limit_middleware).
+    #[error("Too many requests, retry after {retry_after_secs} seconds")]
+    TooManyRequests { retry_after_secs: u64 },
 }
 
 impl ResqlError {
@@ -129,6 +135,7 @@ impl ResqlError {
             ResqlError::BatchStatementFailed { .. } => "BadSqlGrammarException",
             ResqlError::Unauthorized => "UnauthorizedException",
             ResqlError::MethodNotAllowed { .. } => "MethodNotAllowedException",
+            ResqlError::TooManyRequests { .. } => "TooManyRequestsException",
         }
     }
 
@@ -139,6 +146,7 @@ impl ResqlError {
             ResqlError::ForbiddenDatasourceOverride { .. } => StatusCode::FORBIDDEN,
             ResqlError::Unauthorized => StatusCode::UNAUTHORIZED,
             ResqlError::MethodNotAllowed { .. } => StatusCode::METHOD_NOT_ALLOWED,
+            ResqlError::TooManyRequests { .. } => StatusCode::TOO_MANY_REQUESTS,
             _ => StatusCode::BAD_REQUEST,
         }
     }
