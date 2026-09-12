@@ -6,6 +6,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added (fleet stronghold §3.1)
+
+- **Boot refuses to start on a non-loopback bind without an
+  authentication story.** New `security.trust_network: bool` opt-out.
+  Boot fails fast (with an actionable message listing all three
+  satisfying postures) when `server.bind` is non-loopback AND
+  `security.inter_service_token_env` is unset AND
+  `security.trust_network` is not `true`. Semantic config parsing is
+  unchanged — the new check runs from `main.rs::validate_runtime_posture`
+  after parse, so compat-shim / fixture parses still succeed; only
+  the actual boot refuses. Closes the "public bind, no auth, oops"
+  failure mode the F-RES-3 finding flagged as the worst-case shape.
+
 ### Added (v1 runtime break-test — h2ck.me)
 
 - **Optional inter-service bearer gate.** New config field
