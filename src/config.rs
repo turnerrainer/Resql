@@ -489,6 +489,40 @@ impl Config {
             .cloned()
             .unwrap_or_else(|| project.to_string())
     }
+
+    /// Enumerate boot-time security warnings for this config. Every
+    /// entry is a WARN line worth emitting so an operator running with
+    /// a knowingly permissive setting still gets a heads-up.
+    ///
+    /// The first entry the h2ck.me v1 runtime pass flagged is FN1: the
+    /// shipped `resql.yaml` set `cors.allowed_origins: "*"` while the
+    /// CHANGELOG's "closed by default" copy assumed the code-default
+    /// (empty). The shipped file has since been aligned with the safe
+    /// default, but operators who ship their own config with `"*"` in
+    /// production still need a loud reminder — a browser drive-by against
+    /// a wildcard-CORS Resql reads every response body cross-origin.
+    pub fn security_warnings(&self) -> Vec<SecurityWarning> {
+        let mut out = Vec::new();
+        if self.cors.allowed_origins.trim() == "*" {
+            out.push(SecurityWarning {
+                field: "cors.allowed_origins",
+                message:
+                    "cors.allowed_origins is \"*\" — every origin is allowed to read every response \
+                     cross-origin. Replace with a comma-separated allowlist of exact origins \
+                     (e.g. \"https://app.example.com\") before exposing this service to browsers.",
+            });
+        }
+        out
+    }
+}
+
+/// One boot-time security-posture warning. Emitted by `main.rs` at
+/// startup so operators see the same audit line ops teams would see in
+/// a review — see `Config::security_warnings` for the catalogue.
+#[derive(Debug, Clone)]
+pub struct SecurityWarning {
+    pub field: &'static str,
+    pub message: &'static str,
 }
 
 /// True when `bind` is not a loopback / localhost address. Handles the
@@ -885,6 +919,36 @@ datasources:
             let cfg = Config::from_yaml_str(yaml).unwrap();
             assert!(cfg.validate_runtime_posture().is_ok(), "yaml = {yaml}");
         }
+    }
+
+    #[test]
+    fn security_warnings_empty_on_default_config() {
+        // The shipped defaults are safe (CORS closed, header routing off,
+        // /datasources 404). Loopback bind so fleet §3.1's boot-refuse
+        // check doesn't participate — this test focuses on
+        // `security_warnings()` boundary specifically.
+        let cfg =
+            Config::from_yaml_str("sql_dir: ./sql\nserver:\n  bind: \"127.0.0.1:8080\"\n").unwrap();
+        assert!(cfg.security_warnings().is_empty());
+    }
+
+    #[test]
+    fn security_warnings_flag_cors_wildcard() {
+        // FN1: an operator setting allowed_origins: "*" gets a loud
+        // boot-time warning even though the setting is still permitted.
+        let yaml = "sql_dir: ./sql\nserver:\n  bind: \"127.0.0.1:8080\"\ncors:\n  allowed_origins: \"*\"\n";
+        let cfg = Config::from_yaml_str(yaml).unwrap();
+        let warnings = cfg.security_warnings();
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].field, "cors.allowed_origins");
+        assert!(warnings[0].message.contains("every origin"));
+    }
+
+    #[test]
+    fn security_warnings_do_not_fire_on_specific_origin() {
+        let yaml = "sql_dir: ./sql\nserver:\n  bind: \"127.0.0.1:8080\"\ncors:\n  allowed_origins: \"https://app.example.com\"\n";
+        let cfg = Config::from_yaml_str(yaml).unwrap();
+        assert!(cfg.security_warnings().is_empty());
     }
 
     #[test]

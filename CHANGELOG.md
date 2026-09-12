@@ -8,6 +8,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security (v1 runtime break-test — h2ck.me)
 
+- **Shipped `resql.yaml` no longer contradicts the CHANGELOG's "closed
+  by default" copy.** Prior versions carried `allow_datasource_header:
+  true` (with no allowlist — every override 403s anyway) and
+  `cors.allowed_origins: "*"` (browser drive-by lane). The shipped file
+  now matches the code-level safe defaults: header routing left off,
+  CORS empty. Operators who need either lane opt in explicitly.
+  Additionally, the boot log emits one WARN per remaining permissive
+  knob (`security_warnings()`), starting with a "wildcard CORS opens
+  every origin" line whenever `allowed_origins == "*"`. FN1.
+- **Shipped `docker-compose.yml` now runs with `read_only: true`.** The
+  container rootfs is immutable — combined with the existing
+  `cap_drop: ALL` and `no-new-privileges` the compose file already set,
+  an RCE inside the resql process can no longer drop a payload
+  anywhere on disk. Previously `read_only` was commented out with a
+  note about SQLite needing to write to its DB file; the in-memory demo
+  doesn't need that, and file-backed SQLite users are now pointed at
+  the volume-mount pattern (write only to `/var/lib/resql/data`) so the
+  rest of the filesystem stays sealed. FN4.
 - **`/openapi.json` is now 404 by default; enable with
   `admin.openapi_public: true`.** The endpoint previously returned the
   full spec unauth — every registered SQL endpoint, every declared
