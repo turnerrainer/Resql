@@ -258,8 +258,15 @@ async fn request_observability(cfg: LoggingConfig, mut req: Request, next: Next)
     response
 }
 
-async fn openapi_handler(State(state): State<AppState>) -> Json<Value> {
-    Json((*state.openapi).clone())
+async fn openapi_handler(State(state): State<AppState>) -> Response {
+    if !state.config.admin.openapi_public {
+        // FN3: 404 by default so an unauth caller can't enumerate every
+        // registered SQL endpoint via a single GET. Indistinguishable
+        // from a non-mounted endpoint. Operators who need the spec set
+        // `admin.openapi_public: true`.
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    Json((*state.openapi).clone()).into_response()
 }
 
 /// Build a CORS layer from the `cors.allowed_origins` config.

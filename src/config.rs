@@ -153,6 +153,17 @@ pub struct AdminConfig {
     /// the service is Resql at all.
     #[serde(default)]
     pub datasources_public: bool,
+    /// When true, `GET /openapi.json` returns the generated OpenAPI 3.1
+    /// spec — the full catalogue of registered SQL endpoints with their
+    /// declared parameters. When false (default), the endpoint returns
+    /// 404 so an unauth caller cannot enumerate the service's attack
+    /// surface. The FN3 finding from the v1 runtime break-test flagged
+    /// the unauth-enumeration lane; the same env-gate posture as
+    /// `datasources_public` closes it. Operators who need the endpoint
+    /// (dev, staging, or behind a same-origin reverse proxy that
+    /// authenticates before it hits Resql) set this to `true`.
+    #[serde(default)]
+    pub openapi_public: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]

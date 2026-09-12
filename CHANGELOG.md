@@ -6,6 +6,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security (v1 runtime break-test — h2ck.me)
+
+- **`/openapi.json` is now 404 by default; enable with
+  `admin.openapi_public: true`.** The endpoint previously returned the
+  full spec unauth — every registered SQL endpoint, every declared
+  parameter, every response shape — giving a network-reachable
+  attacker a free catalogue of the surface to probe. Now it follows
+  the same env-gate posture as `/datasources`: default off,
+  indistinguishable from a non-mounted route, opt-in per deployment.
+  Operators who need the spec (dev, staging, or behind a same-origin
+  reverse proxy that authenticates before it hits Resql) set
+  `admin.openapi_public: true`. FN3.
+
 ### Added (fleet stronghold §8.2)
 
 - **`resql doctor` — pre-boot health check subcommand.** Parses the

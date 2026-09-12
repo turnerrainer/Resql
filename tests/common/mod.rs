@@ -38,6 +38,7 @@ pub struct TestAppBuilder {
     allow_header: bool,
     max_body: usize,
     datasources_public: bool,
+    openapi_public: bool,
     request_timeout_secs: u64,
     /// F-RES-3: when set, the built app enables the inter-service
     /// bearer gate with this token as the expected secret. Tests that
@@ -59,6 +60,11 @@ impl TestAppBuilder {
             // Tests exercise the endpoint behaviour by default; the
             // production posture is off.
             datasources_public: true,
+            // FN3: default the test posture ON so the pre-existing
+            // /openapi.json integration tests keep asserting on the
+            // 200 response body. Production defaults to OFF (404) —
+            // tests exercising that posture flip via `openapi_public(false)`.
+            openapi_public: true,
             request_timeout_secs: 30,
             inter_service_token: None,
         }
@@ -76,6 +82,13 @@ impl TestAppBuilder {
     /// or 404 (false, matching the production default under R5).
     pub fn datasources_public(mut self, enabled: bool) -> Self {
         self.datasources_public = enabled;
+        self
+    }
+
+    /// Toggle whether the `/openapi.json` endpoint returns the spec
+    /// (true) or 404 (false, matching the production default under FN3).
+    pub fn openapi_public(mut self, enabled: bool) -> Self {
+        self.openapi_public = enabled;
         self
     }
 
@@ -242,6 +255,7 @@ impl TestAppBuilder {
             openapi: resql::config::OpenApiConfig::default(),
             admin: resql::config::AdminConfig {
                 datasources_public: self.datasources_public,
+                openapi_public: self.openapi_public,
             },
             security: resql::config::SecurityConfig::default(),
             compat_diagnostics: Vec::new(),
