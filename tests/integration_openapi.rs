@@ -61,11 +61,20 @@ async fn openapi_endpoint_returns_404_when_gate_disabled() {
         )
         .build()
         .await;
-    let (status, body) = app.request("GET", "/openapi.json", None, &[]).await;
+    // Since FN5's `envelope_error_reshape` middleware landed, any 4xx
+    // that came from the router without the ResqlError envelope shape
+    // gets rewritten to the canonical envelope: body → `[]`, headers
+    // set to a status-derived exception name. So a 404 from the
+    // openapi gate now looks like `[]` + `NotFoundException` in the
+    // headers instead of a bare empty body.
+    let (status, headers, body) = app.request_full("GET", "/openapi.json", None, &[]).await;
     assert_eq!(status, 404);
-    assert!(
-        body.is_null() || body.as_str().map(|s| s.is_empty()).unwrap_or(false),
-        "expected empty 404 body, got {body:?}"
+    assert_eq!(body, serde_json::json!([]));
+    assert_eq!(
+        headers
+            .get("x-resql-error-code")
+            .and_then(|v| v.to_str().ok()),
+        Some("NotFoundException"),
     );
 }
 

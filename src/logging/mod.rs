@@ -21,6 +21,28 @@ pub fn sanitize_log_value(s: &str) -> String {
     s.replace(['\n', '\r'], " ")
 }
 
+/// Cap a user-controlled string's length before it enters a log line.
+/// FN-LOG-1 / FN-LOG-2 in the v1 runtime break-test: parameter names
+/// and URL path segments arrive from clients and get echoed into WARN
+/// messages. Without a cap, a 100 KB JSON key or a 100 KB URL suffix
+/// would produce a 100 KB log line — cheap DoS for the log store and a
+/// shape a log-shipper regex may fail on.
+///
+/// Truncation appends a fixed marker so a log reader knows the value
+/// was clipped rather than "just" that long. Cheap on the common case
+/// (`s.len() <= max` → same allocation).
+pub fn truncate_for_log(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_string();
+    }
+    // Truncate on a char boundary so we don't split multi-byte UTF-8.
+    let mut end = max;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…[truncated {} bytes]", &s[..end], s.len() - end)
+}
+
 /// Format an error's `source()` chain as ` -> caused by: <msg>` links,
 /// bounded to 5 hops so a runaway cause chain can't fill a log line.
 pub fn error_chain(err: &(dyn std::error::Error + 'static)) -> String {
@@ -154,6 +176,33 @@ mod tests {
         let chain = error_chain(&deep);
         assert!(chain.contains("caused by"));
         assert!(chain.ends_with("caused by: ..."));
+    }
+
+    #[test]
+    fn truncate_for_log_leaves_short_strings() {
+        assert_eq!(truncate_for_log("hi", 64), "hi");
+    }
+
+    #[test]
+    fn truncate_for_log_clips_long_strings_with_marker() {
+        let big = "x".repeat(200);
+        let out = truncate_for_log(&big, 64);
+        assert!(out.starts_with(&"x".repeat(64)));
+        assert!(out.contains("[truncated"), "out = {out}");
+        assert!(
+            out.contains("136 bytes"),
+            "expected 200-64 bytes noted, out = {out}"
+        );
+    }
+
+    #[test]
+    fn truncate_for_log_respects_utf8_boundaries() {
+        // The multi-byte "€" (3 bytes) must not be split mid-sequence.
+        let s = format!("{}€suffix", "a".repeat(63));
+        let out = truncate_for_log(&s, 64);
+        // 64 lands mid-€: we back off to 63 → "aaa...aaa" (63 a's) + marker.
+        assert!(out.starts_with(&"a".repeat(63)));
+        assert!(out.contains("[truncated"));
     }
 
     #[test]

@@ -6,6 +6,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security (v1 log-attack pass — h2ck.me)
+
+- **User-controlled fields that land in WARN log lines and error
+  response headers are now length-capped and CRLF-stripped.** FN-LOG-1
+  and FN-LOG-2 in the v1 log-attack pass: a caller sending a 100 KB
+  JSON key or an absurdly long URL path would produce a 100 KB WARN
+  line and a 100 KB `X-Resql-Error-Message` header (cheap DoS for the
+  log store and rejected on size by some proxies). Now every path
+  where user input flows into a log-line or response-header goes
+  through the new `truncate_for_log` helper (cap at 1 KB with a
+  `[truncated N bytes]` marker), and CR/LF stripping runs before the
+  message hits the log template. Sanitiser for
+  `X-Resql-Error-Message` also caps at 1 KB with `...` marker so a
+  compliant peer / proxy will never reject the response on header
+  size. Server request logs already used `sanitize_log_value` on the
+  route — a per-line truncate to 512 chars has been added for the
+  same reason.
+
 ### Security (v1 runtime break-test — h2ck.me)
 
 - **Shipped `resql.yaml` no longer contradicts the CHANGELOG's "closed
