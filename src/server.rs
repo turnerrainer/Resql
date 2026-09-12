@@ -407,7 +407,12 @@ async fn dispatch_batch(
         .get(&ds_name)
         .ok_or_else(|| ResqlError::UnknownDataSource(ds_name.clone()))?;
 
+    // `deny_unknown_fields` matches fleet stronghold §2.2 — a caller
+    // sending `{"queries":[...],"attacker_field":true}` gets rejected
+    // rather than having the extra key silently dropped. Cheap and
+    // uniform with the config schema's posture.
     #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
     struct BatchBody {
         queries: Vec<Value>,
     }
