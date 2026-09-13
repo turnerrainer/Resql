@@ -6,16 +6,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed (BREAKING for image inspection, not for callers)
+
+- **Runtime container base swapped from `debian:bookworm-slim` to
+  `gcr.io/distroless/cc-debian12:nonroot`.** Package count drops from
+  ~107 to ~15; image size ~120 MB → ~33 MB. Every fixable HIGH/CRITICAL
+  Trivy finding is closed AND every unfixable HIGH/CRITICAL that was
+  landing via `curl` / `libldap-2.5-0` / `libkrb5-*` / `libnghttp2-14`
+  / `libp11-kit0` / `perl-base` / `util-linux-extra` is gone with the
+  packages themselves. Remaining CVE surface: 0 HIGH, 0 CRITICAL, small
+  MEDIUM/LOW residue in glibc / libssl3 / libgcc (all `affected` /
+  `fix_deferred`, i.e. no upstream fix — unavoidable in a glibc runtime).
+  **What breaks**: any operator who was `docker exec … sh` into the
+  container for debugging. Distroless has no shell. Use `docker run
+  --rm -it gcr.io/distroless/cc-debian12:debug-nonroot` (the debug tag
+  includes busybox) or a sidecar for troubleshooting.
+- **Runtime user is now `nonroot` (UID 65532) instead of `resql` (UID
+  1000).** Bind-mounted config/sql directories need to be readable by
+  UID 65532. Docker + k8s handle this uniformly via `USER` + fsGroup;
+  operators using host bind-mounts on custom UIDs will need to widen
+  file permissions or use a `--chown` on the mount.
+
+### Added
+
+- **`resql health` subcommand.** Container-native HTTP health probe that
+  does a raw `std::net::TcpStream` + HTTP/1.0 GET against a URL
+  (default `http://127.0.0.1:8080/health`). Exits 0 on 2xx, 1 otherwise.
+  Replaces the previous `curl -fsS http://127.0.0.1:8080/health` in the
+  Dockerfile HEALTHCHECK — that curl dep was the reason the runtime
+  image was carrying the whole libssl3/libldap/libkrb5/libnghttp2 CVE
+  surface. Also usable from CI or a supervisord probe.
+
 ### Fixed
 
-- **Dockerfile: `apt-get upgrade -y` in both build + runtime stages.**
+- **Dockerfile: `apt-get upgrade -y` in the build + tini-source stages.**
   The debian:bookworm-slim base image can lag behind the Debian security
   tracker by days-to-weeks; without an in-Dockerfile upgrade, freshly
   built images ship packages Debian has ALREADY patched. This blocked
   the v0.4.0-alpha publish on 2026-09-13 — Trivy's HIGH/CRITICAL gate
   fired on `libpcre2-8-0` (CVE-2026-86145 + CVE-2026-89161, both fixed
-  in `10.42-1+deb12u1`). Runtime layer now pulls all pending security
-  patches before installing runtime deps; no functional change.
+  in `10.42-1+deb12u1`). The distroless runtime base (added in the
+  same release) makes this less relevant on the runtime layer, but the
+  build stage + tini-source stage both keep the upgrade for the same
+  reason.
 
 ## [0.4.0-alpha] - 2026-09-13
 

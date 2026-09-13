@@ -53,6 +53,20 @@ enum Command {
         #[arg(long)]
         strict: bool,
     },
+    /// Container-native HTTP health probe. Does a raw TCP+HTTP GET
+    /// against the given URL and exits 0 if the response status is
+    /// 2xx, 1 otherwise. Implemented with `std::net::TcpStream` so
+    /// it needs no shell + no curl — this lets the shipped container
+    /// image drop `curl` (and its whole libssl3/libldap/libkrb5/
+    /// libnghttp2 dep chain) and run on a distroless base.
+    Health {
+        /// URL to probe. Only http:// is supported.
+        #[arg(long, default_value = "http://127.0.0.1:8080/health")]
+        url: String,
+        /// Connect + read timeout in milliseconds.
+        #[arg(long, default_value_t = 3000)]
+        timeout_ms: u64,
+    },
 }
 
 const CONFIG_CANDIDATES: &[&str] = &[
@@ -96,6 +110,7 @@ fn main() -> ExitCode {
             }
         },
         Command::Doctor { strict } => doctor(cli.config.as_ref(), *strict),
+        Command::Health { url, timeout_ms } => health_check(url, *timeout_ms),
     }
 }
 
@@ -263,6 +278,95 @@ fn init_tracing(level: &str, format: &str) {
             .ok(),
         _ => base.with(tracing_subscriber::fmt::layer()).try_init().ok(),
     };
+}
+
+/// Container-native health check. Point `HEALTHCHECK CMD ["/app/resql",
+/// "health"]` at this. Uses only `std::net::TcpStream` and a hand-rolled
+/// HTTP/1.0 GET so the runtime image can be distroless (no shell, no
+/// curl, no wget). Returns 0 on 2xx, 1 otherwise; prints one diagnostic
+/// line on stderr so `docker inspect --format '{{.State.Health}}'` shows
+/// something meaningful when a probe fails.
+fn health_check(url: &str, timeout_ms: u64) -> ExitCode {
+    use std::io::{Read, Write};
+    use std::net::{TcpStream, ToSocketAddrs};
+    use std::time::Duration;
+
+    let rest = match url.strip_prefix("http://") {
+        Some(r) => r,
+        None => {
+            eprintln!("health: only http:// URLs supported (got {url})");
+            return ExitCode::FAILURE;
+        }
+    };
+    let (authority, path) = rest
+        .split_once('/')
+        .map(|(a, p)| (a, format!("/{p}")))
+        .unwrap_or((rest, "/".to_string()));
+    let (host, port) = authority
+        .rsplit_once(':')
+        .and_then(|(h, p)| p.parse::<u16>().ok().map(|p| (h, p)))
+        .unwrap_or((authority, 80u16));
+
+    let timeout = Duration::from_millis(timeout_ms);
+    let addr = match (host, port).to_socket_addrs() {
+        Ok(mut it) => match it.next() {
+            Some(a) => a,
+            None => {
+                eprintln!("health: no addresses for {host}:{port}");
+                return ExitCode::FAILURE;
+            }
+        },
+        Err(e) => {
+            eprintln!("health: resolve {host}:{port} failed: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let mut stream = match TcpStream::connect_timeout(&addr, timeout) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("health: connect {addr} failed: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let _ = stream.set_read_timeout(Some(timeout));
+    let _ = stream.set_write_timeout(Some(timeout));
+
+    let req = format!("GET {path} HTTP/1.0\r\nHost: {host}\r\nConnection: close\r\n\r\n");
+    if let Err(e) = stream.write_all(req.as_bytes()) {
+        eprintln!("health: send failed: {e}");
+        return ExitCode::FAILURE;
+    }
+
+    // Cap the read so a misbehaving server can't keep this probe alive
+    // past its timeout with a slow trickle.
+    let mut buf = Vec::with_capacity(512);
+    let mut tmp = [0u8; 256];
+    while buf.len() < 4096 {
+        match stream.read(&mut tmp) {
+            Ok(0) => break,
+            Ok(n) => buf.extend_from_slice(&tmp[..n]),
+            Err(e) => {
+                eprintln!("health: read failed: {e}");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+
+    let head = std::str::from_utf8(&buf).unwrap_or("");
+    let first_line = head.lines().next().unwrap_or("");
+    let code: u16 = first_line
+        .split_whitespace()
+        .nth(1)
+        .unwrap_or("0")
+        .parse()
+        .unwrap_or(0);
+    if (200..300).contains(&code) {
+        ExitCode::SUCCESS
+    } else {
+        eprintln!("health: status {code}");
+        ExitCode::FAILURE
+    }
 }
 
 async fn shutdown_signal() {

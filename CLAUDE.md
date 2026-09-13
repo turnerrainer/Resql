@@ -26,7 +26,8 @@ Entry points worth knowing:
 ## Current version
 
 - **Latest published**: `0.3.0-alpha` — live on `docker.io/turnerrainer/resql:0.3.0-alpha` + `ghcr.io/turnerrainer/resql:0.3.0-alpha`, cosign-signed, published 2026-09-10. GitHub Release: <https://github.com/turnerrainer/Resql/releases/tag/v0.3.0-alpha>.
-- **In `Cargo.toml` on `dev`**: `0.4.0-alpha`. The next merge to `dev` that lands this version bump will auto-tag `v0.4.0-alpha` and auto-publish via `.github/workflows/auto-tag.yml` — no manual `git tag` needed. `publish.yml` then creates the GitHub Release from the matching CHANGELOG section.
+- **In `Cargo.toml` on `dev`**: `0.4.0-alpha`. The `v0.4.0-alpha` tag was pushed 2026-09-13 but the publish workflow failed at Trivy's HIGH/CRITICAL gate (two `libpcre2-8-0` CVEs from a stale `debian:bookworm-slim` base). PR #50 fixes that by (a) `apt-get upgrade` in build stages, (b) swapping the runtime base to `gcr.io/distroless/cc-debian12:nonroot`, (c) adding a `resql health` subcommand so HEALTHCHECK doesn't need curl. Post-merge the version needs to bump to `0.4.1-alpha` (auto-tag + auto-publish fires on merge); the vulnerable `:0.4.0-alpha` tags on both registries should also be deleted.
+- **Runtime base**: distroless — no shell, no apt, no curl. Debugging = `docker run --rm -it gcr.io/distroless/cc-debian12:debug-nonroot` or a sidecar. Runtime user is `nonroot` (UID 65532), not `resql` (UID 1000) — bind-mounts must be readable by UID 65532.
 
 ## v1 security-audit changes (BREAKING for existing configs)
 
