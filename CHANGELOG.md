@@ -6,7 +6,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.4.1-alpha] - 2026-09-13
+## [0.4.2-alpha] - 2026-09-13
+
+**Same intent as `0.4.1-alpha` (musl-static + distroless/static runtime
+that ships 0 CVEs), reissued because the `0.4.1-alpha` publish workflow
+also failed** — the multi-arch Dockerfile was using
+`FROM builder-${TARGETARCH}`, which BuildKit refuses at graph-solve time
+because platform-detection ARG values (`TARGETARCH`, `TARGETPLATFORM`,
+etc.) are not populated in the global scope early enough to be
+interpolated into a stage NAME. The Dockerfile is rewritten around a
+single `cargo-zigbuild` builder that dispatches on `TARGETARCH` inside
+a RUN step — which IS a scope in which BuildKit auto-populates the ARG.
+
+Also adds a `.dockerignore` (was missing — build context was sending the
+entire local `target/` directory to the daemon on every invocation).
+
+**Neither `0.4.0-alpha` nor `0.4.1-alpha` container tags on the
+registries are cosign-signed** — both publish workflows failed before
+the sign step. Treat any pull of those tags as invalid; upgrade
+straight to `0.4.2-alpha`. Manual registry cleanup of the vulnerable
+`0.4.0-alpha` tags happens post-release (`0.4.1-alpha` never had
+container tags pushed because the multi-arch build failed at the
+Dockerfile parse step, before any push).
+
+## [0.4.1-alpha] - 2026-09-13 [NEVER SHIPPED]
+
+**Never shipped.** Tagged `v0.4.1-alpha` on 2026-09-13 but the publish
+workflow failed at the multi-arch Dockerfile parse step (see
+`0.4.2-alpha` for the root cause + fix). No container images or GitHub
+Release exist for this version. The `v0.4.1-alpha` git tag remains on
+the remote as a historical marker but points to a commit whose
+Dockerfile can't build multi-arch.
+
+**Content-wise identical to `0.4.2-alpha` minus the Dockerfile fix + the
+`.dockerignore`.** The `0.4.1-alpha` section below documents the
+original intent — everything there is delivered in `0.4.2-alpha`.
 
 **Container-hardening patch release.** No behavioural change to the HTTP
 API or config schema — every fix is in the shipped Docker image. The
@@ -18,10 +52,11 @@ supply-chain risk: **the shipped image now contains zero Debian
 packages**, so future glibc / openssl / curl / util-linux CVEs cannot
 land in it at all.
 
-**What operators actually see**:
+**What operators actually see** (in `0.4.2-alpha`, which is the version
+that ships this):
 
-- `docker.io/turnerrainer/resql:0.4.1-alpha` +
-  `ghcr.io/turnerrainer/resql:0.4.1-alpha` are cosign-signed keyless
+- `docker.io/turnerrainer/resql:0.4.2-alpha` +
+  `ghcr.io/turnerrainer/resql:0.4.2-alpha` are cosign-signed keyless
   via GHA OIDC (same as prior releases).
 - Trivy scan on the published image: **0 vulns / 0 secrets /
   0 misconfigurations at any severity**.
@@ -32,8 +67,8 @@ land in it at all.
 - **The `0.4.0-alpha` container tag on both registries is unsigned
   and known-vulnerable** (build+push happens before Trivy in the
   publish workflow; the failed run left the images behind). Operators
-  should upgrade straight to `0.4.1-alpha` and treat any pull of
-  `:0.4.0-alpha` as invalid.
+  should upgrade straight to `0.4.2-alpha` and treat any pull of
+  `:0.4.0-alpha` or `:0.4.1-alpha` as invalid.
 
 ### Changed (BREAKING for image inspection, not for callers)
 
@@ -533,7 +568,8 @@ Spring Boot service. Interface-compatible with the original for the SQL-file-to-
 - Container image signed with cosign keyless via GHA OIDC.
 - Trivy HIGH/CRITICAL scan gates image signing.
 
-[Unreleased]: https://github.com/turnerrainer/Resql/compare/v0.4.1-alpha...HEAD
+[Unreleased]: https://github.com/turnerrainer/Resql/compare/v0.4.2-alpha...HEAD
+[0.4.2-alpha]: https://github.com/turnerrainer/Resql/releases/tag/v0.4.2-alpha
 [0.4.1-alpha]: https://github.com/turnerrainer/Resql/releases/tag/v0.4.1-alpha
 [0.4.0-alpha]: https://github.com/turnerrainer/Resql/releases/tag/v0.4.0-alpha
 [0.3.0-alpha]: https://github.com/turnerrainer/Resql/releases/tag/v0.3.0-alpha
