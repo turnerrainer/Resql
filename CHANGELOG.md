@@ -6,6 +6,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0-alpha] - 2026-09-13
+
+**Security release closing the h2ck.me v1 runtime break-test, log-attack
+pass, and fleet-strongholds adoption.** **Minor bump because several
+defaults tighten in ways that will make some `0.3.x-alpha` deployments
+refuse to boot** — most notably the new fleet §3.1 refuse-check
+(`server.bind` non-loopback + no auth story = boot fails), and
+`/openapi.json` returning 404 by default. See the
+[README "Upgrading to 0.4.0-alpha"](https://github.com/turnerrainer/Resql/blob/dev/README.md#upgrading)
+short list and
+[`CLAUDE.md` section 9-20](https://github.com/turnerrainer/Resql/blob/dev/CLAUDE.md#v1-runtime-break-test--log-attack-changes-pre-040-alpha)
+for grep recipes + the paste-in Python auditor.
+
+**New pre-boot health check:** `resql doctor -c path/to/resql.yaml`
+runs the same safety checks `serve` runs, never binds a port, and
+exits `0` / `1` / `2` for CI-friendly gating. Wire it in before
+upgrading.
+
 ### Added (R8)
 
 - **Optional built-in rate limiter.** New config block
@@ -436,7 +454,8 @@ Spring Boot service. Interface-compatible with the original for the SQL-file-to-
 - Container image signed with cosign keyless via GHA OIDC.
 - Trivy HIGH/CRITICAL scan gates image signing.
 
-[Unreleased]: https://github.com/turnerrainer/Resql/compare/v0.3.0-alpha...HEAD
+[Unreleased]: https://github.com/turnerrainer/Resql/compare/v0.4.0-alpha...HEAD
+[0.4.0-alpha]: https://github.com/turnerrainer/Resql/releases/tag/v0.4.0-alpha
 [0.3.0-alpha]: https://github.com/turnerrainer/Resql/releases/tag/v0.3.0-alpha
 [0.2.0-alpha]: https://github.com/turnerrainer/Resql/releases/tag/v0.2.0-alpha
 [0.1.2-alpha]: https://github.com/turnerrainer/Resql/releases/tag/v0.1.2-alpha

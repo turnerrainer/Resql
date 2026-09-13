@@ -25,8 +25,8 @@ Entry points worth knowing:
 
 ## Current version
 
-- **Latest published**: `0.2.0-alpha` — live on `docker.io/turnerrainer/resql:0.2.0-alpha` + `ghcr.io/turnerrainer/resql:0.2.0-alpha`, cosign-signed, published 2026-09-06.
-- **In `Cargo.toml` on `dev`**: `0.2.0-alpha`. Next merged commit that bumps `Cargo.toml` will auto-tag and auto-publish via `.github/workflows/auto-tag.yml` — no manual `git tag` needed.
+- **Latest published**: `0.3.0-alpha` — live on `docker.io/turnerrainer/resql:0.3.0-alpha` + `ghcr.io/turnerrainer/resql:0.3.0-alpha`, cosign-signed, published 2026-09-10. GitHub Release: <https://github.com/turnerrainer/Resql/releases/tag/v0.3.0-alpha>.
+- **In `Cargo.toml` on `dev`**: `0.4.0-alpha`. The next merge to `dev` that lands this version bump will auto-tag `v0.4.0-alpha` and auto-publish via `.github/workflows/auto-tag.yml` — no manual `git tag` needed. `publish.yml` then creates the GitHub Release from the matching CHANGELOG section.
 
 ## v1 security-audit changes (BREAKING for existing configs)
 

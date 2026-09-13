@@ -4,7 +4,7 @@ SQL-files-as-REST-endpoints microservice. Drop a `.sql` file, get an HTTP
 endpoint. Rust rewrite of the [Bürokratt Resql](https://github.com/buerokratt/Resql)
 Spring Boot service.
 
-**Latest published:** 0.2.0-alpha (`docker.io/turnerrainer/resql:0.2.0-alpha`, also `ghcr.io/turnerrainer/resql:0.2.0-alpha`, cosign-signed) — closes the h2ck.me v1 pre-publication security audit. **Breaking config defaults** — see [Upgrading to 0.2.0-alpha](#upgrading-to-020-alpha) before you re-deploy.
+**Latest published:** 0.4.0-alpha (`docker.io/turnerrainer/resql:0.4.0-alpha`, also `ghcr.io/turnerrainer/resql:0.4.0-alpha`, cosign-signed) — closes the h2ck.me v1 runtime break-test + log-attack pass, adopts every applicable fleet stronghold. **Breaking defaults + new boot-refuse check** — see [Upgrading to 0.4.0-alpha](#upgrading-to-040-alpha) before you re-deploy.
 **License:** [Apache-2.0](./LICENSE)
 
 ## One-command demo
@@ -13,39 +13,52 @@ The shipped image wires **two** SQLite datasources (`users` and `audit`)
 so multi-database routing works out of the box.
 
 ```bash
-docker run --rm -p 8080:8080 turnerrainer/resql:0.2.0-alpha
+docker run --rm -p 8080:8080 turnerrainer/resql:0.4.0-alpha
 curl "http://localhost:8080/users/hello?name=world"
 # [{"greeting":"hello from users db, world!"}]
 curl "http://localhost:8080/audit/tail?n=42"
 # [{"entry":"audit entry 42","rowId":42}]     ← different backend, same server
 ```
 
-## Upgrading to 0.2.0-alpha
+## Upgrading to 0.4.0-alpha
 
-The v1 security audit (h2ck.me) flipped several config defaults and
-introduced new required schema. If you deploy Resql today, take five
-minutes to check your `resql.yaml` against this list before pulling
-the next container. Full text in [`CHANGELOG.md`](./CHANGELOG.md).
+The v1 runtime break-test + log-attack pass (h2ck.me) drove a second
+wave of hardening. The one change most likely to bite is the new
+**fleet §3.1 boot-refuse check**: a non-loopback `server.bind` without
+an authentication story now fails to start. **Run
+`resql doctor -c path/to/resql.yaml`** against every config before
+pulling the next container — it's a side-effect-free dry run that
+exits `1` on the same failures `serve` would.
 
-| Change | Old default | New default | Break if you had… |
+| Change | Old behaviour | New behaviour | Break if you had… |
 |---|---|---|---|
-| `allow_datasource_header` | `true` | `false` | …clients sending `X-Datasource` to route requests |
-| `datasource_header_allowlist` | *n/a* | required when header routing is on | `allow_datasource_header: true` and no allowlist → **every override 403** |
-| `cors.allowed_origins` | `"*"` | `""` (no CORS layer at all) | …a browser client depending on the wildcard |
-| CORS methods + headers | all echoed on preflight | `GET`/`POST` + 4 named headers only | …a client preflighting `DELETE` or a custom header |
-| `/datasources` endpoint | `200` with data | `404` | …a bootstrap client hitting `/datasources` for discovery |
-| `admin.datasources_public` | *n/a* | `false` | (set `true` to restore the endpoint — response is redacted regardless) |
-| `request_timeout_seconds: 0` | silently ignored | boot fails with a config error | …timeout accidentally set to 0 |
-| Long-running requests | never timed out | `504 Gateway Timeout` at `request_timeout_seconds` | …a client that ran queries longer than the timeout |
-| Batch endpoint error body | raw driver text | `"Batch failed at statement N of M, rolled back"` | …a client regex'ing the message for schema names |
+| Boot on non-loopback bind | started regardless of auth story | **refuses** unless `security.inter_service_token_env` set OR `security.trust_network: true` OR bind is loopback (§3.1) | …`0.0.0.0:...` bind and no `security` block. Fix: add `security.trust_network: true` if a proxy authenticates upstream, or `inter_service_token_env` for the built-in bearer gate |
+| `/openapi.json` | `200` with full spec | `404` (FN3) | …a client bootstrapping from the spec. Fix: `admin.openapi_public: true` |
+| Method mismatch on saved query | `400 ResqlRuntimeException` | `405` with `Allow:` header (FN6) | …a client regex'ing the "does not exist" body/message |
+| 413 (body too large) | bare `text/plain` | header-envelope shape (FN5) | …a client parsing the body text |
+| 504 (request timeout) | empty body, no headers | header-envelope shape (FN5) | …a client parsing the (empty) body |
+| Shipped `docker-compose.yml` | writable rootfs | `read_only: true` + tmpfs `/tmp` (FN4) | …a container that wrote outside `/tmp` |
+| Shipped `resql.yaml` | `allow_datasource_header: true`, `cors: "*"` | matches the code-level safe defaults + `security.trust_network: true` for the demo (FN1 + shipped-config fix) | (opt in to either lane explicitly per site) |
 
-**Auditing an existing config** — a paste-in script + per-key `grep`
-recipes live in [`CLAUDE.md`](./CLAUDE.md#fastest-way-to-audit-a-live-config).
+**New surfaces that are OFF by default** (opt in per deployment):
+
+- `security.inter_service_token_env: <ENV_VAR>` — built-in `Authorization: Bearer` gate. F-RES-3.
+- `rate_limit: { requests_per_second, burst }` — global token bucket, 429 + `Retry-After` on exhaust. R8.
+- `admin.openapi_public: true` — re-enable `GET /openapi.json`.
+
+**Boot-time WARN catalogue** — every knowingly permissive knob emits a
+WARN at boot (§8.1): wildcard CORS, non-loopback bind, `datasources_public`,
+`print_stack_trace`, plaintext datasource `password:`. Ops teams see the
+same audit line at boot they'd see in a review.
+
+**Auditing an existing config** — the fastest gate is `resql doctor
+-c resql.yaml --strict` — exit 0 = clean, exit 1 = hard error, exit 2 =
+warnings only (with `--strict`). Wire it into CI.
 
 **Writing a new config** — a fully-annotated hardened reference
-`resql.yaml`, two common variants (browser-facing, legitimate header
-routing), and a *do-not-do* checklist live in [`CLAUDE.md`](./CLAUDE.md#best-practice-resqlyaml-for-a-hardened-deployment).
-Start from that block and delete anything that doesn't apply.
+`resql.yaml`, deployment topologies (proxy-fronted vs direct-exposure),
+and a *do-not-do* checklist live in [`CLAUDE.md`](./CLAUDE.md#best-practice-resqlyaml-for-a-hardened-deployment)
++ [Configuration → Complete example](https://turnerrainer.github.io/Resql/configuration.html#complete-example--proxy-fronted-internal-service).
 
 ## Docs
 
