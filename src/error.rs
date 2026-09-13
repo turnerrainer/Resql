@@ -74,6 +74,16 @@ pub enum ResqlError {
     /// which constraint / table / column tripped.
     #[error("Batch failed at statement {index} of {total}, rolled back")]
     BatchStatementFailed { index: usize, total: usize },
+
+    /// The inter-service bearer gate (`SecurityConfig`) is enabled and
+    /// the request either omitted `Authorization: Bearer …` or
+    /// presented a token that failed constant-time comparison. The
+    /// caller-visible message is deliberately generic (no "invalid
+    /// token" vs "missing header" distinction) so a probe cannot be
+    /// used as an oracle for whether a specific header shape counts as
+    /// "sent a token". F-RES-3.
+    #[error("Authentication required")]
+    Unauthorized,
 }
 
 impl ResqlError {
@@ -96,6 +106,7 @@ impl ResqlError {
                 "ForbiddenDatasourceOverrideException"
             }
             ResqlError::BatchStatementFailed { .. } => "BadSqlGrammarException",
+            ResqlError::Unauthorized => "UnauthorizedException",
         }
     }
 
@@ -104,6 +115,7 @@ impl ResqlError {
             ResqlError::BodyTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
             ResqlError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
             ResqlError::ForbiddenDatasourceOverride { .. } => StatusCode::FORBIDDEN,
+            ResqlError::Unauthorized => StatusCode::UNAUTHORIZED,
             _ => StatusCode::BAD_REQUEST,
         }
     }
