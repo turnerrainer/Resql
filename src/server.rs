@@ -16,7 +16,7 @@ use tracing::Instrument;
 
 use crate::config::{Config, LoggingConfig};
 use crate::db::{DatasourceRegistry, SharedRegistry};
-use crate::error::ResqlError;
+use crate::error::{ResqlError, ERROR_CODE_HEADER, ERROR_MESSAGE_HEADER};
 use crate::health::{self, StartTime};
 use crate::loader::{HttpMethod, QueryIndex};
 use crate::logging::{generate_traceparent, sanitize_log_value, trace_id_from_traceparent};
@@ -80,11 +80,26 @@ pub fn router(state: AppState) -> Router {
             timeout,
         ))
         .layer(RequestBodyLimitLayer::new(body_limit))
+        // FN5: RequestBodyLimit + TimeoutLayer emit their responses
+        // outside the router — so bare-text "length limit exceeded"
+        // 413s and empty-body 504s bypass the ResqlError envelope. This
+        // middleware sits OUTSIDE those two layers (so it sees their
+        // responses) and inside the observability layer (so the access
+        // log still fires exactly once); it rewrites any non-2xx that
+        // arrives without the two error headers into the canonical
+        // header-envelope shape: body becomes `[]`, X-Resql-Error-Code
+        // and X-Resql-Error-Message carry the exception name + message.
+        // Existing ResqlError responses already carry the headers, so
+        // this middleware leaves them untouched (idempotent).
+        .layer(middleware::from_fn(envelope_error_reshape))
         // F-RES-3: optional shared-secret bearer gate. When enabled it
         // sits INSIDE the observability middleware (so the access log
         // still fires for 401s) but OUTSIDE the timeout / body-limit
         // layers (so an unauth request never occupies a pool slot or
         // pays wall-clock time for a big body). Health probes bypass.
+        // The bearer's own 401 already carries the envelope shape via
+        // ResqlError::Unauthorized, so envelope_error_reshape below is
+        // idempotent on it.
         .layer(middleware::from_fn(move |req, next| {
             let token = bearer_for_layer.clone();
             require_inter_service_bearer(token, req, next)
@@ -151,6 +166,124 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
         diff |= x ^ y;
     }
     diff == 0
+}
+
+/// Rewrite bare non-2xx responses from lower layers into the
+/// header-envelope shape ResqlError uses. Any 4xx/5xx that arrives
+/// without `X-Resql-Error-Code` gets:
+///
+/// - body swapped to the empty JSON array `[]` (so a naive
+///   `body.length > 0` in a downstream DSL sees 0 rows on any error
+///   and fails closed, matching issue #25),
+/// - `X-Resql-Error-Code` set to the canonical exception name for the
+///   status (see `envelope_kind_for_status`),
+/// - `X-Resql-Error-Message` set to a printable-ASCII summary derived
+///   from the original body if it looks like text, otherwise the
+///   status's canonical reason phrase.
+///
+/// Idempotent — ResqlError responses already carry both headers, so
+/// this middleware skips them. This fixes the FN5 finding: previously
+/// oversize bodies returned `413 length limit exceeded` as
+/// `text/plain`, while every other error path already used the
+/// envelope; downstream callers had to special-case one class of
+/// error.
+async fn envelope_error_reshape(req: Request, next: Next) -> Response {
+    let response = next.run(req).await;
+    let status = response.status();
+    if status.is_success() || status.is_redirection() || status.is_informational() {
+        return response;
+    }
+    if response.headers().contains_key(ERROR_CODE_HEADER) {
+        // Already envelope-shaped (came from ResqlError::into_response).
+        return response;
+    }
+    let (parts, body) = response.into_parts();
+    let bytes = axum::body::to_bytes(body, 64 * 1024)
+        .await
+        .unwrap_or_default();
+    let kind = envelope_kind_for_status(parts.status);
+    let message = derive_envelope_message(&parts, &bytes);
+    // Rebuild the response with the envelope shape. Preserve original
+    // status; drop the incoming body and any inherited headers that
+    // would conflict with the JSON body shape.
+    let mut resp = (parts.status, Json(Value::Array(Vec::new()))).into_response();
+    let headers = resp.headers_mut();
+    // Copy through any downstream-set headers we care about (e.g. the
+    // trace id added by the observability middleware after this layer
+    // — it lands on the outbound response, not this one, so we don't
+    // need to copy it here; but do preserve `Retry-After` etc. that a
+    // 429 might carry).
+    for (name, value) in parts.headers.iter() {
+        // Skip content-* because Json::into_response set its own.
+        let n = name.as_str();
+        if n.eq_ignore_ascii_case("content-length") || n.eq_ignore_ascii_case("content-type") {
+            continue;
+        }
+        headers.insert(name.clone(), value.clone());
+    }
+    if let Ok(v) = HeaderValue::from_str(kind) {
+        headers.insert(HeaderName::from_static(ERROR_CODE_HEADER), v);
+    }
+    if let Ok(v) = HeaderValue::from_str(&sanitize_message_for_header(&message)) {
+        headers.insert(HeaderName::from_static(ERROR_MESSAGE_HEADER), v);
+    }
+    resp
+}
+
+/// Map an HTTP status the framework emitted on its own into the
+/// canonical exception name Resql uses in the envelope headers. Names
+/// mirror the Spring-family patterns already used by
+/// `ResqlError::kind()` so downstream DSLs can match on a single
+/// stable vocabulary regardless of which layer produced the error.
+fn envelope_kind_for_status(s: StatusCode) -> &'static str {
+    match s {
+        StatusCode::PAYLOAD_TOO_LARGE => "PayloadTooLargeException",
+        StatusCode::GATEWAY_TIMEOUT => "RequestTimeoutException",
+        StatusCode::REQUEST_TIMEOUT => "RequestTimeoutException",
+        StatusCode::METHOD_NOT_ALLOWED => "MethodNotAllowedException",
+        StatusCode::NOT_FOUND => "NotFoundException",
+        StatusCode::FORBIDDEN => "ForbiddenException",
+        StatusCode::UNAUTHORIZED => "UnauthorizedException",
+        StatusCode::BAD_REQUEST => "MalformedRequestException",
+        s if s.is_server_error() => "InternalError",
+        _ => "ResqlRuntimeException",
+    }
+}
+
+fn derive_envelope_message(parts: &axum::http::response::Parts, bytes: &[u8]) -> String {
+    // Prefer the original body when it's a short printable-text hint
+    // (that's the shape tower-http's `RequestBodyLimit` produces —
+    // "length limit exceeded"). Fall back to the status's reason phrase
+    // so 504 with an empty body still carries a human-readable string.
+    if !bytes.is_empty() && bytes.len() <= 512 {
+        if let Ok(s) = std::str::from_utf8(bytes) {
+            let s = s.trim();
+            if !s.is_empty() && s.chars().all(|c| c == '\t' || (' '..='~').contains(&c)) {
+                return s.to_string();
+            }
+        }
+    }
+    parts
+        .status
+        .canonical_reason()
+        .unwrap_or("Error")
+        .to_string()
+}
+
+/// Same sanitiser as `ResqlError::into_response`'s
+/// `sanitize_header_value` — kept private to avoid re-exporting from
+/// `error.rs`. Restricts the message to printable ASCII + tab so the
+/// header value is HTTP-valid and cannot be used for header splitting.
+fn sanitize_message_for_header(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if c == '\t' || (' '..='~').contains(&c) {
+            out.push(c);
+        } else {
+            out.push('?');
+        }
+    }
+    out
 }
 
 const TRACEPARENT_HEADER: &str = "traceparent";
