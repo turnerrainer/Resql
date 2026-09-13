@@ -138,6 +138,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unguarded Ruuter DSL) is no longer one `curl` away from unauth SQL
   execution against every registered datasource.
 
+### Added (fleet stronghold §8.1)
+
+- **Extended boot-time WARN catalogue.** The `Config::security_warnings`
+  entry seeded by FN1 now covers four additional permissive knobs:
+  non-loopback `server.bind` without an auth gate; `admin.datasources_public: true`
+  (topology leak on an unauth endpoint); `logging.print_stack_trace: true`
+  (schema-name leak in error chains); any datasource carrying a
+  plaintext `password:` (Java-compat form; steer to `password_env`).
+  Each check emits one WARN at boot with the field name and the
+  actionable "fix by …" hint — matching the TIM / CronManager reference
+  pattern from the fleet stronghold guidance.
+
 ## [0.3.0-alpha] - 2026-09-10
 
 **Minor bump because the error-response wire shape changed.** Configs

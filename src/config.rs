@@ -512,8 +512,76 @@ impl Config {
                      (e.g. \"https://app.example.com\") before exposing this service to browsers.",
             });
         }
+        // Fleet stronghold §8.1: fail-loud on every knowingly permissive
+        // knob so ops teams see the audit line at boot rather than in
+        // a break-test six months later.
+        if bind_is_non_loopback(&self.server.bind) {
+            out.push(SecurityWarning {
+                field: "server.bind",
+                message:
+                    "server.bind is a non-loopback address. Unless a reverse proxy sits in front \
+                     that authenticates every request, or `security.inter_service_token_env` is set, \
+                     Resql is one HTTP request away from unauth SQL execution. Consider binding \
+                     127.0.0.1:<port> and letting the proxy forward, or enabling the bearer gate.",
+            });
+        }
+        if self.admin.datasources_public {
+            out.push(SecurityWarning {
+                field: "admin.datasources_public",
+                message:
+                    "admin.datasources_public is true — `GET /datasources` returns the (redacted) \
+                     list of registered pools. Even redacted this leaks backend topology to any \
+                     unauth caller. Leave off in production unless ops explicitly relies on it.",
+            });
+        }
+        if self.logging.print_stack_trace {
+            out.push(SecurityWarning {
+                field: "logging.print_stack_trace",
+                message:
+                    "logging.print_stack_trace is true — error `source()` chains can leak schema \
+                     names, constraint names, and other SQL detail from the underlying driver. \
+                     Leave off in production; on only when actively debugging.",
+            });
+        }
+        for ds in &self.datasources {
+            if ds.password.as_deref().is_some_and(|s| !s.is_empty()) {
+                out.push(SecurityWarning {
+                    field: "datasources[].password",
+                    message:
+                        "datasource sets `password:` (plaintext) — this is the Java-compat form. \
+                         Switch to `password_env: <ENV_VAR_NAME>` so the secret never sits in a \
+                         config file that tends to leak into image layers and backups.",
+                });
+                break; // one WARN per boot regardless of count
+            }
+        }
         out
     }
+}
+
+/// True when `bind` is a non-loopback socket address. Handles the
+/// three shapes an operator is likely to write: `0.0.0.0:PORT`,
+/// `[::]:PORT`, and `HOST:PORT` where HOST is neither localhost nor a
+/// loopback literal. Boot-time WARN uses this to nudge operators who
+/// deploy to a public interface without a reverse proxy or bearer gate.
+fn bind_is_non_loopback(bind: &str) -> bool {
+    // Extract host portion (strip port suffix). For IPv6 the host is
+    // wrapped in `[...]`; for IPv4 / hostname it's everything before the
+    // last colon.
+    let host = if let Some(stripped) = bind.strip_prefix('[') {
+        // `[::1]:PORT` shape
+        match stripped.find(']') {
+            Some(end) => &stripped[..end],
+            None => bind, // malformed; be permissive
+        }
+    } else {
+        // `1.2.3.4:PORT` or `host.example.com:PORT`
+        match bind.rfind(':') {
+            Some(idx) => &bind[..idx],
+            None => bind,
+        }
+    };
+    !matches!(host, "127.0.0.1" | "::1" | "localhost")
 }
 
 /// One boot-time security-posture warning. Emitted by `main.rs` at
@@ -923,12 +991,12 @@ datasources:
 
     #[test]
     fn security_warnings_empty_on_default_config() {
-        // The shipped defaults are safe (CORS closed, header routing off,
         // /datasources 404). Loopback bind so fleet §3.1's boot-refuse
-        // check doesn't participate — this test focuses on
+        // check doesn't participate AND fleet §8.1's non-loopback bind
+        // warning doesn't fire either — this test focuses on
         // `security_warnings()` boundary specifically.
-        let cfg =
-            Config::from_yaml_str("sql_dir: ./sql\nserver:\n  bind: \"127.0.0.1:8080\"\n").unwrap();
+        let yaml = "sql_dir: ./sql\nserver:\n  bind: \"127.0.0.1:8080\"\n";
+        let cfg = Config::from_yaml_str(yaml).unwrap();
         assert!(cfg.security_warnings().is_empty());
     }
 
@@ -936,12 +1004,16 @@ datasources:
     fn security_warnings_flag_cors_wildcard() {
         // FN1: an operator setting allowed_origins: "*" gets a loud
         // boot-time warning even though the setting is still permitted.
+        // Bind to loopback so the fleet §8.1 bind-warning doesn't fire.
         let yaml = "sql_dir: ./sql\nserver:\n  bind: \"127.0.0.1:8080\"\ncors:\n  allowed_origins: \"*\"\n";
         let cfg = Config::from_yaml_str(yaml).unwrap();
         let warnings = cfg.security_warnings();
-        assert_eq!(warnings.len(), 1);
-        assert_eq!(warnings[0].field, "cors.allowed_origins");
-        assert!(warnings[0].message.contains("every origin"));
+        assert!(warnings.iter().any(|w| w.field == "cors.allowed_origins"));
+        let cors_w = warnings
+            .iter()
+            .find(|w| w.field == "cors.allowed_origins")
+            .unwrap();
+        assert!(cors_w.message.contains("every origin"));
     }
 
     #[test]
@@ -949,6 +1021,85 @@ datasources:
         let yaml = "sql_dir: ./sql\nserver:\n  bind: \"127.0.0.1:8080\"\ncors:\n  allowed_origins: \"https://app.example.com\"\n";
         let cfg = Config::from_yaml_str(yaml).unwrap();
         assert!(cfg.security_warnings().is_empty());
+    }
+
+    #[test]
+    fn security_warnings_flag_non_loopback_bind() {
+        // Fleet §8.1: a public bind without an auth gate deserves a
+        // loud reminder even if the operator understands the risk.
+        let yaml = "sql_dir: ./sql\nserver:\n  bind: \"0.0.0.0:8080\"\n";
+        let cfg = Config::from_yaml_str(yaml).unwrap();
+        let warnings = cfg.security_warnings();
+        assert!(
+            warnings.iter().any(|w| w.field == "server.bind"),
+            "{warnings:?}"
+        );
+    }
+
+    #[test]
+    fn security_warnings_do_not_fire_on_loopback_bind() {
+        let yaml = "sql_dir: ./sql\nserver:\n  bind: \"127.0.0.1:8080\"\n";
+        let cfg = Config::from_yaml_str(yaml).unwrap();
+        assert!(cfg
+            .security_warnings()
+            .iter()
+            .all(|w| w.field != "server.bind"));
+
+        let yaml6 = "sql_dir: ./sql\nserver:\n  bind: \"[::1]:8080\"\n";
+        let cfg6 = Config::from_yaml_str(yaml6).unwrap();
+        assert!(cfg6
+            .security_warnings()
+            .iter()
+            .all(|w| w.field != "server.bind"));
+
+        let yaml_localhost = "sql_dir: ./sql\nserver:\n  bind: \"localhost:8080\"\n";
+        let cfg_localhost = Config::from_yaml_str(yaml_localhost).unwrap();
+        assert!(cfg_localhost
+            .security_warnings()
+            .iter()
+            .all(|w| w.field != "server.bind"));
+    }
+
+    #[test]
+    fn security_warnings_flag_public_datasources_endpoint() {
+        let yaml = "sql_dir: ./sql\nserver:\n  bind: \"127.0.0.1:8080\"\nadmin:\n  datasources_public: true\n";
+        let cfg = Config::from_yaml_str(yaml).unwrap();
+        assert!(
+            cfg.security_warnings()
+                .iter()
+                .any(|w| w.field == "admin.datasources_public"),
+            "{:?}",
+            cfg.security_warnings(),
+        );
+    }
+
+    #[test]
+    fn security_warnings_flag_print_stack_trace() {
+        let yaml = "sql_dir: ./sql\nserver:\n  bind: \"127.0.0.1:8080\"\nlogging:\n  print_stack_trace: true\n";
+        let cfg = Config::from_yaml_str(yaml).unwrap();
+        assert!(cfg
+            .security_warnings()
+            .iter()
+            .any(|w| w.field == "logging.print_stack_trace"));
+    }
+
+    #[test]
+    fn security_warnings_flag_plaintext_datasource_password() {
+        let yaml = r#"
+sql_dir: ./sql
+server:
+  bind: "127.0.0.1:8080"
+datasources:
+  - name: x
+    url: "postgres://host/db"
+    username: "u"
+    password: "plain-secret"
+"#;
+        let cfg = Config::from_yaml_str(yaml).unwrap();
+        assert!(cfg
+            .security_warnings()
+            .iter()
+            .any(|w| w.field == "datasources[].password"));
     }
 
     #[test]
