@@ -5,7 +5,7 @@
 # ─────────────────────────────────────────────────────────────
 FROM rust:1.88-slim AS builder
 WORKDIR /build
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends \
         pkg-config libssl-dev ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
@@ -16,9 +16,15 @@ RUN cargo build --release --locked --bin resql
 # ─────────────────────────────────────────────────────────────
 # Runtime stage — minimal Debian, non-root, tini, self-contained.
 # ─────────────────────────────────────────────────────────────
+# `apt-get upgrade -y` pulls Debian security patches on top of the base
+# image so time-lagged base-image releases don't ship known-fixed CVEs.
+# Without this, Trivy's `--ignore-unfixed --severity HIGH,CRITICAL` gate
+# in publish.yml can fire on issues Debian has ALREADY patched but the
+# base image hasn't yet rebuilt (e.g. CVE-2026-86145 / CVE-2026-89161 in
+# libpcre2 blocked v0.4.0-alpha publish on 2026-09-13).
 FROM debian:bookworm-slim
 WORKDIR /app
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends \
         libssl3 ca-certificates tini curl \
     && rm -rf /var/lib/apt/lists/*
 

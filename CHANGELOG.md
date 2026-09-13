@@ -6,6 +6,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Dockerfile: `apt-get upgrade -y` in both build + runtime stages.**
+  The debian:bookworm-slim base image can lag behind the Debian security
+  tracker by days-to-weeks; without an in-Dockerfile upgrade, freshly
+  built images ship packages Debian has ALREADY patched. This blocked
+  the v0.4.0-alpha publish on 2026-09-13 — Trivy's HIGH/CRITICAL gate
+  fired on `libpcre2-8-0` (CVE-2026-86145 + CVE-2026-89161, both fixed
+  in `10.42-1+deb12u1`). Runtime layer now pulls all pending security
+  patches before installing runtime deps; no functional change.
+
 ## [0.4.0-alpha] - 2026-09-13
 
 **Security release closing the h2ck.me v1 runtime break-test, log-attack
