@@ -48,6 +48,28 @@ async fn openapi_route_returns_valid_document() {
 }
 
 #[tokio::test]
+async fn openapi_endpoint_returns_404_when_gate_disabled() {
+    // FN3: an unauth caller must not be able to enumerate the endpoint
+    // catalogue via `/openapi.json`. Same posture as `/datasources`:
+    // the endpoint is 404 by default so the response is
+    // indistinguishable from a non-mounted route.
+    let app = TestAppBuilder::new()
+        .openapi_public(false)
+        .with_sql(
+            "crm/GET/users/find.sql",
+            "/*\nparams:\n  login: { type: string, required: true }\n*/\nSELECT :login;",
+        )
+        .build()
+        .await;
+    let (status, body) = app.request("GET", "/openapi.json", None, &[]).await;
+    assert_eq!(status, 404);
+    assert!(
+        body.is_null() || body.as_str().map(|s| s.is_empty()).unwrap_or(false),
+        "expected empty 404 body, got {body:?}"
+    );
+}
+
+#[tokio::test]
 async fn missing_optional_param_still_bound_via_e2e() {
     // Cross-check the runtime behaviour that the /openapi.json spec
     // advertises: an optional param can be omitted from the request and
