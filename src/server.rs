@@ -106,6 +106,13 @@ pub fn router(state: AppState) -> Router {
             let token = bearer_for_layer.clone();
             require_inter_service_bearer(token, req, next)
         }))
+        // Fleet stronghold §5.1 — set the five browser-side defence
+        // headers on every response. Resql is a JSON API that sits
+        // behind Ruuter, so a browser should never render its output,
+        // but a reverse-proxy misconfiguration (dev, staging, or a
+        // rule that accidentally serves the JSON as text/html) could
+        // let a payload get evaluated. Cheap defence-in-depth.
+        .layer(middleware::from_fn(security_headers_middleware))
         .layer(middleware::from_fn(move |req, next| {
             let cfg = logging_for_layer.clone();
             request_observability(cfg, req, next)
@@ -286,6 +293,56 @@ fn sanitize_message_for_header(s: &str) -> String {
         }
     }
     out
+}
+
+/// Fleet stronghold §5.1: five browser-side defence headers on every
+/// response. Resql serves JSON only, so a browser should never render
+/// its output — but a proxy misconfiguration (rare, but possible in
+/// dev / staging) that serves the JSON as text/html would let a hostile
+/// payload get evaluated. These headers close that lane.
+///
+/// - `Content-Security-Policy: default-src 'none'; frame-ancestors 'none'`
+///   — a rendered response can neither load nor be framed by anything.
+/// - `Strict-Transport-Security: max-age=63072000; includeSubDomains`
+///   — pins HTTPS for browsers that speak to Resql directly. Duplicates
+///   the reverse-proxy header on well-shaped deployments; adds it when
+///   the proxy is missing.
+/// - `X-Frame-Options: DENY` — legacy anti-clickjacking; still respected
+///   by browsers that don't parse CSP frame-ancestors.
+/// - `X-Content-Type-Options: nosniff` — the only header here with a
+///   direct payoff on the JSON path; prevents a browser from re-typing
+///   the response body away from `application/json`.
+/// - `Referrer-Policy: no-referrer` — no referrer header ever leaks a
+///   Resql URL to a third party.
+async fn security_headers_middleware(req: Request, next: Next) -> Response {
+    let mut response = next.run(req).await;
+    let headers = response.headers_mut();
+    // Set-only (not insert-or-append) — a reverse proxy sits ABOVE
+    // Resql, so its Set-Cookie / cache-control decisions may override
+    // these but should never conflict. entry(...).or_insert(...) would
+    // let a handler-set value survive; we don't have any such handler,
+    // and preserving the fleet defaults is the more auditable posture.
+    headers.insert(
+        HeaderName::from_static("content-security-policy"),
+        HeaderValue::from_static("default-src 'none'; frame-ancestors 'none'"),
+    );
+    headers.insert(
+        HeaderName::from_static("strict-transport-security"),
+        HeaderValue::from_static("max-age=63072000; includeSubDomains"),
+    );
+    headers.insert(
+        HeaderName::from_static("x-frame-options"),
+        HeaderValue::from_static("DENY"),
+    );
+    headers.insert(
+        HeaderName::from_static("x-content-type-options"),
+        HeaderValue::from_static("nosniff"),
+    );
+    headers.insert(
+        HeaderName::from_static("referrer-policy"),
+        HeaderValue::from_static("no-referrer"),
+    );
+    response
 }
 
 const TRACEPARENT_HEADER: &str = "traceparent";

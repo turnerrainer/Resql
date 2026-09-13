@@ -6,6 +6,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added (fleet stronghold §5.1)
+
+- **Every response now carries the five browser-side defence headers:**
+  `Content-Security-Policy: default-src 'none'; frame-ancestors 'none'`,
+  `Strict-Transport-Security: max-age=63072000; includeSubDomains`,
+  `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`,
+  `Referrer-Policy: no-referrer`. Resql serves JSON only, so a browser
+  should never render its output, but a reverse-proxy misconfiguration
+  that serves the JSON as `text/html` (or an attacker who tricks a
+  browser into re-typing it) would let a hostile payload get evaluated.
+  Cheap defence-in-depth, adopted verbatim from the fleet stronghold
+  guidance (`h2ck.me/FLEET-STRONGHOLDS.md` §5.1). Applies uniformly to
+  success responses, error responses, and health probes.
+
 ### Security (v1 log-attack pass — h2ck.me)
 
 - **User-controlled fields that land in WARN log lines and error
