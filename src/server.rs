@@ -41,6 +41,92 @@ pub struct AppState {
     /// boot from `security.inter_service_token_env` so the auth
     /// middleware doesn't `getenv` per request. `None` = gate disabled.
     pub inter_service_token: Arc<Option<String>>,
+    /// Optional global rate limiter (R8). `None` = disabled (default).
+    /// Shared across every request via `Arc` and internally guarded by
+    /// a `Mutex` — token acquisition is O(1) so contention is
+    /// negligible for realistic RPS.
+    pub rate_limiter: Arc<Option<RateLimiter>>,
+}
+
+/// Global token-bucket rate limiter (R8). One bucket per process,
+/// scaled by 1000 internally so sub-token refill deltas don't get lost
+/// to integer truncation.
+pub struct RateLimiter {
+    inner: std::sync::Mutex<RateLimiterState>,
+    /// Refill rate scaled by 1000 (tokens * 1000 per millisecond).
+    /// Precomputed at construction so acquire path just multiplies.
+    refill_scaled_per_ms: i64,
+    /// Effective bucket size in scaled tokens.
+    burst_scaled: i64,
+}
+
+struct RateLimiterState {
+    /// Current tokens available, scaled by 1000.
+    tokens_scaled: i64,
+    /// Last refill timestamp — milliseconds since UNIX epoch. Using
+    /// wall-clock rather than a monotonic Instant so multi-thread
+    /// callers see a consistent view without extra synchronisation
+    /// with a reference epoch.
+    last_refill_ms: i64,
+}
+
+impl RateLimiter {
+    pub fn new(requests_per_second: u32, burst: u32) -> Self {
+        // Callers are expected to have run `Config::effective_rate_limit_burst`
+        // which auto-sizes burst=0 to 2*rps; if a caller passes bare
+        // ints (tests) `burst.max(1)` guarantees at least one token
+        // ever fits in the bucket. `.max()` on `burst` alone (NOT vs
+        // rps) — a legitimate config might want burst < rps for
+        // aggressive smoothing.
+        let rps = requests_per_second.max(1) as i64;
+        let burst_scaled = (burst.max(1) as i64).saturating_mul(1000);
+        let refill_scaled_per_ms = rps; // rps tokens/sec = rps*1000 tokens*1000/1000ms = rps scaled/ms
+        Self {
+            inner: std::sync::Mutex::new(RateLimiterState {
+                tokens_scaled: burst_scaled,
+                last_refill_ms: now_ms(),
+            }),
+            refill_scaled_per_ms,
+            burst_scaled,
+        }
+    }
+
+    /// Try to consume one token. On success returns `Ok(())`; on
+    /// exhaustion returns `Err(retry_after_secs)` — always at least 1
+    /// so a caller's `Retry-After` header is a valid HTTP-delta.
+    pub fn try_acquire(&self) -> Result<(), u64> {
+        let mut state = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let now = now_ms();
+        let elapsed = (now - state.last_refill_ms).max(0);
+        state.tokens_scaled = (state.tokens_scaled
+            + elapsed.saturating_mul(self.refill_scaled_per_ms))
+        .min(self.burst_scaled);
+        state.last_refill_ms = now;
+        if state.tokens_scaled >= 1000 {
+            state.tokens_scaled -= 1000;
+            Ok(())
+        } else {
+            // Deficit in scaled tokens → convert back to millis needed
+            // for one full token to refill. `refill_scaled_per_ms` >= 1
+            // by construction (rps >= 1 when enabled).
+            let deficit_scaled = 1000 - state.tokens_scaled;
+            // Inline ceil-div: `int::div_ceil` is unstable on rustc
+            // 1.88 (the pinned rustfmt / clippy version), so open-code
+            // it to keep the toolchain requirement stable.
+            let refill = self.refill_scaled_per_ms.max(1);
+            let millis_needed = (deficit_scaled + refill - 1) / refill;
+            let secs = (millis_needed / 1000).max(1) as u64;
+            Err(secs)
+        }
+    }
+}
+
+fn now_ms() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 pub fn router(state: AppState) -> Router {
@@ -49,6 +135,7 @@ pub fn router(state: AppState) -> Router {
     let timeout = Duration::from_secs(state.config.server.request_timeout_seconds);
     let logging_for_layer = state.config.logging.clone();
     let bearer_for_layer = state.inter_service_token.clone();
+    let rate_limiter_for_layer = state.rate_limiter.clone();
 
     let mut router = Router::new()
         .route("/health", get(health_handler))
@@ -106,6 +193,14 @@ pub fn router(state: AppState) -> Router {
             let token = bearer_for_layer.clone();
             require_inter_service_bearer(token, req, next)
         }))
+        // R8: optional global rate limiter. Sits OUTSIDE the bearer
+        // gate + body-limit + timeout so a rate-limited request never
+        // pays for any of them. `/health` and `/healthz` bypass so LB
+        // liveness isn't affected. No-op when the config disables it.
+        .layer(middleware::from_fn(move |req, next| {
+            let limiter = rate_limiter_for_layer.clone();
+            rate_limit_middleware(limiter, req, next)
+        }))
         // Fleet stronghold §5.1 — set the five browser-side defence
         // headers on every response. Resql is a JSON API that sits
         // behind Ruuter, so a browser should never render its output,
@@ -159,6 +254,41 @@ async fn require_inter_service_bearer(
         return ResqlError::Unauthorized.into_response();
     }
     next.run(req).await
+}
+
+/// R8 middleware. When a global rate limiter is configured, try to
+/// take a token before letting the request through. On exhaustion,
+/// return `429 Too Many Requests` + a `Retry-After` header. Health
+/// probes bypass the limiter so a saturated bucket doesn't flap the
+/// load balancer.
+async fn rate_limit_middleware(
+    limiter: Arc<Option<RateLimiter>>,
+    req: Request,
+    next: Next,
+) -> Response {
+    let Some(limiter) = limiter.as_ref() else {
+        return next.run(req).await;
+    };
+    let path = req.uri().path();
+    if path == HEALTH_PATH || path == HEALTHZ_PATH {
+        return next.run(req).await;
+    }
+    match limiter.try_acquire() {
+        Ok(()) => next.run(req).await,
+        Err(retry_after_secs) => {
+            tracing::warn!(
+                error.kind = "TooManyRequestsException",
+                retry_after_secs,
+                "rate limit exceeded"
+            );
+            let mut resp = ResqlError::TooManyRequests { retry_after_secs }.into_response();
+            if let Ok(v) = HeaderValue::from_str(&retry_after_secs.to_string()) {
+                resp.headers_mut()
+                    .insert(axum::http::header::RETRY_AFTER, v);
+            }
+            resp
+        }
+    }
 }
 
 /// Constant-time byte-slice equality on the shorter of the two
@@ -783,6 +913,14 @@ pub async fn init(config: Config) -> Result<AppState, ResqlError> {
     .await?;
     let spec = openapi::build_spec(&index, &config.openapi);
     let bearer = Arc::new(config.resolved_inter_service_token());
+    let rate_limiter = if config.rate_limit.requests_per_second > 0 {
+        Some(RateLimiter::new(
+            config.rate_limit.requests_per_second,
+            config.effective_rate_limit_burst(),
+        ))
+    } else {
+        None
+    };
     Ok(AppState {
         config: Arc::new(config),
         index: Arc::new(index),
@@ -790,6 +928,7 @@ pub async fn init(config: Config) -> Result<AppState, ResqlError> {
         start: StartTime::now(),
         openapi: Arc::new(spec),
         inter_service_token: bearer,
+        rate_limiter: Arc::new(rate_limiter),
     })
 }
 

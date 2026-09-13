@@ -43,10 +43,41 @@ pub struct Config {
     pub admin: AdminConfig,
     #[serde(default)]
     pub security: SecurityConfig,
+    #[serde(default)]
+    pub rate_limit: RateLimitConfig,
     /// Diagnostics collected by the compat shim. Populated in
     /// `from_yaml_str`; consumed at boot by `main.rs`. Never serialized.
     #[serde(skip)]
     pub compat_diagnostics: Vec<Diagnostic>,
+}
+
+/// Optional global rate limiter (R8). Off by default — Resql's design
+/// is to sit behind a reverse proxy that applies caller-aware rate
+/// limits at the edge. When Resql is directly exposed (dev, staging
+/// without Ruuter, small deployments), this in-process token bucket
+/// provides a coarse blanket cap so a single misbehaving caller can't
+/// pin the pool.
+///
+/// Scope is deliberately **global (per-process)**, not per-IP: Resql
+/// almost always sees the reverse proxy's IP as the caller, so per-IP
+/// buckets would collapse to a single-key cache and add nothing over
+/// the global version. Operators who need per-caller rate limits should
+/// apply them at the proxy where the real caller IP is visible.
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct RateLimitConfig {
+    /// Sustained request rate cap. **0 disables the middleware
+    /// entirely** — no token-bucket accounting, no CPU cost per
+    /// request. Non-zero enables it.
+    #[serde(default)]
+    pub requests_per_second: u32,
+    /// Bucket capacity — the maximum burst size an idle bucket can
+    /// absorb before rate-limiting kicks in. When set to 0, defaults
+    /// to `requests_per_second * 2` so a small burst has room. Values
+    /// smaller than `requests_per_second` would produce a rate ceiling
+    /// lower than the intended sustained rate; validation rejects that.
+    #[serde(default)]
+    pub burst: u32,
 }
 
 /// Optional inter-service authentication surface. Default is OFF —
@@ -427,6 +458,20 @@ impl Config {
                 Ok(_) => {}
             }
         }
+        // R8: reject a rate-limit config that's semantically nonsensical
+        // — a burst smaller than the sustained rate would cap throughput
+        // below the rate itself. Operators who genuinely want a very
+        // small bucket should set both fields to that value.
+        if self.rate_limit.requests_per_second > 0
+            && self.rate_limit.burst > 0
+            && self.rate_limit.burst < self.rate_limit.requests_per_second
+        {
+            return Err(ResqlError::Internal(format!(
+                "rate_limit.burst ({burst}) must be >= rate_limit.requests_per_second ({rps}) or 0 to auto-size",
+                burst = self.rate_limit.burst,
+                rps = self.rate_limit.requests_per_second
+            )));
+        }
         Ok(())
     }
 
@@ -479,6 +524,20 @@ impl Config {
         match std::env::var(&self.security.inter_service_token_env) {
             Ok(v) if !v.is_empty() => Some(v),
             _ => None,
+        }
+    }
+
+    /// Effective burst capacity for the rate-limit middleware. Applies
+    /// the "0 = auto-size to 2 * rps" default so config authors don't
+    /// have to think about the burst tunable unless they want to.
+    pub fn effective_rate_limit_burst(&self) -> u32 {
+        if self.rate_limit.burst > 0 {
+            self.rate_limit.burst
+        } else {
+            self.rate_limit
+                .requests_per_second
+                .saturating_mul(2)
+                .max(self.rate_limit.requests_per_second)
         }
     }
 

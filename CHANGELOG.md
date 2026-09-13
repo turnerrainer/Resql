@@ -6,19 +6,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added (fleet stronghold §5.1)
+### Added (R8)
 
-- **Every response now carries the five browser-side defence headers:**
-  `Content-Security-Policy: default-src 'none'; frame-ancestors 'none'`,
-  `Strict-Transport-Security: max-age=63072000; includeSubDomains`,
-  `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`,
-  `Referrer-Policy: no-referrer`. Resql serves JSON only, so a browser
-  should never render its output, but a reverse-proxy misconfiguration
-  that serves the JSON as `text/html` (or an attacker who tricks a
-  browser into re-typing it) would let a hostile payload get evaluated.
-  Cheap defence-in-depth, adopted verbatim from the fleet stronghold
-  guidance (`h2ck.me/FLEET-STRONGHOLDS.md` §5.1). Applies uniformly to
-  success responses, error responses, and health probes.
+- **Optional built-in rate limiter.** New config block
+  `rate_limit: { requests_per_second: u32, burst: u32 }` (default
+  `requests_per_second: 0` — disabled; the middleware isn't attached
+  and adds zero cost per request). When enabled, a global
+  process-wide token bucket caps sustained throughput at `rps` with
+  bucket size `burst` (auto-sizes to `2 * rps` when `burst: 0`).
+  Exhaustion returns `429 Too Many Requests` in the canonical
+  header-envelope shape (`X-Resql-Error-Code: TooManyRequestsException`)
+  plus an RFC 6585 `Retry-After` header. Health probes bypass the
+  bucket so LB liveness isn't affected by rate saturation. Scope is
+  deliberately global rather than per-IP: Resql almost always sees a
+  reverse proxy's IP, so per-IP buckets collapse to a single-key
+  cache. Operators who need per-caller rate limits should apply them
+  at the proxy where real client IPs are visible. R8.
 
 ### Security (v1 log-attack pass — h2ck.me)
 
