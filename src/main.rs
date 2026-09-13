@@ -1,7 +1,8 @@
 use std::path::{Path, PathBuf};
+use std::process::ExitCode;
 
 use anyhow::{Context, Result};
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use tokio::net::TcpListener;
 use tokio::signal;
 use tracing::{info, warn};
@@ -22,8 +23,36 @@ struct Cli {
     /// `/app/resql.yaml`, `./resql.yaml`, `./application.yml` (Java default),
     /// `./application-prod.yml`, `./application-dev.yml`, `./application-test.yml`.
     /// The first existing candidate wins.
-    #[arg(short = 'c', long = "config", env = "RESQL_CONFIG")]
+    #[arg(short = 'c', long = "config", env = "RESQL_CONFIG", global = true)]
     config: Option<PathBuf>,
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Debug, Subcommand)]
+enum Command {
+    /// Run the HTTP service (default when no subcommand is given).
+    Serve,
+    /// Pre-boot health check — parse the config, run every safety
+    /// check that `serve` runs, and exit non-zero if the deployment
+    /// would fail to boot or would boot into a knowingly unsafe
+    /// posture. Never binds a port, never opens a datasource pool,
+    /// never mutates any external state.
+    ///
+    /// Exit code convention:
+    ///   0 — every check passed
+    ///   1 — one or more errors (config parse failure, semantic
+    ///       validation, refuse-on-non-loopback-without-auth)
+    ///   2 — no errors but one or more security warnings emitted;
+    ///       only returned when `--strict` is passed. Without
+    ///       `--strict`, warnings print but exit stays 0.
+    Doctor {
+        /// Elevate security warnings to failures (exit code 2).
+        /// Off by default so operators can wire `doctor` into CI as a
+        /// non-blocking check and still see the warning stream.
+        #[arg(long)]
+        strict: bool,
+    },
 }
 
 const CONFIG_CANDIDATES: &[&str] = &[
@@ -35,8 +64,8 @@ const CONFIG_CANDIDATES: &[&str] = &[
     "./application-test.yml",
 ];
 
-fn resolve_config_path(cli: &Cli) -> Result<PathBuf> {
-    if let Some(explicit) = &cli.config {
+fn resolve_config_path(explicit: Option<&PathBuf>) -> Result<PathBuf> {
+    if let Some(explicit) = explicit {
         return Ok(explicit.clone());
     }
     for c in CONFIG_CANDIDATES {
@@ -51,10 +80,27 @@ fn resolve_config_path(cli: &Cli) -> Result<PathBuf> {
     )
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> ExitCode {
     let cli = Cli::parse();
-    let config_path = resolve_config_path(&cli)?;
+    match cli.command.as_ref().unwrap_or(&Command::Serve) {
+        Command::Serve => match tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime")
+            .block_on(run_serve(cli.config.as_ref()))
+        {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("Error: {e:?}");
+                ExitCode::FAILURE
+            }
+        },
+        Command::Doctor { strict } => doctor(cli.config.as_ref(), *strict),
+    }
+}
+
+async fn run_serve(config: Option<&PathBuf>) -> Result<()> {
+    let config_path = resolve_config_path(config)?;
     let cfg = Config::from_path(&config_path)
         .with_context(|| format!("loading config from {}", config_path.display()))?;
 
@@ -110,6 +156,74 @@ async fn main() -> Result<()> {
         .context("axum serve")?;
     info!("bye");
     Ok(())
+}
+
+/// Fleet stronghold §8.2 — pre-boot health check. Reads and parses
+/// the config, runs every safety check that `serve` runs (semantic
+/// validation via `Config::from_path` -> `validate()`, then
+/// `validate_runtime_posture()` for fleet §3.1), and prints
+/// compat-shim diagnostics in the same order `serve` would emit them.
+/// Never binds a port, never opens a datasource pool — this is
+/// deliberately side-effect-free so ops teams can point it at a
+/// candidate config in staging without disturbing anything.
+///
+/// Output goes to stdout for easy piping / grep; exit code is the
+/// contract with CI (see `Command::Doctor` docs for the mapping).
+fn doctor(config: Option<&PathBuf>, strict: bool) -> ExitCode {
+    let config_path = match resolve_config_path(config) {
+        Ok(p) => p,
+        Err(e) => {
+            println!("ERROR: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    println!("resql doctor — config: {}", config_path.display());
+    let cfg = match Config::from_path(&config_path) {
+        Ok(c) => c,
+        Err(e) => {
+            println!("ERROR: config parse / semantic validation failed: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    println!("OK  : config parsed and semantically valid");
+
+    // Compat-shim diagnostics — informational, don't gate the exit
+    // code. Same output the operator sees at `serve` boot.
+    for d in &cfg.compat_diagnostics {
+        let level = match d.level {
+            DiagLevel::Warn => "WARN",
+            DiagLevel::Info => "INFO",
+        };
+        println!("{level}: [compat] {}: {}", d.source_field, d.message);
+    }
+
+    // NOTE: `Config::security_warnings()` (fleet §8.1, PR #40 stacked
+    // on #32) is not on this branch. When those merge to dev this
+    // doctor should loop `for w in cfg.security_warnings() { warnings
+    // += 1; println!("WARN: [security] {}: {}", w.field, w.message); }`
+    // right here. Stub kept explicit so the follow-up is a one-line
+    // change.
+    let warnings = 0usize;
+
+    match cfg.validate_runtime_posture() {
+        Ok(()) => {
+            println!("OK  : runtime-posture check (fleet §3.1)");
+        }
+        Err(e) => {
+            println!("ERROR: runtime-posture check (fleet §3.1) failed: {e}");
+            return ExitCode::FAILURE;
+        }
+    }
+
+    println!("\ndoctor summary: {warnings} warning(s), errors: 0. strict={strict}",);
+    if warnings > 0 && strict {
+        // Exit 2 (distinct from "hard error" 1) so CI can distinguish
+        // "config is warning-clean" from "config actually refuses to
+        // boot". Only fires with --strict; otherwise warnings are
+        // informational.
+        return ExitCode::from(2);
+    }
+    ExitCode::SUCCESS
 }
 
 fn init_tracing(level: &str, format: &str) {
