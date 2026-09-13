@@ -77,6 +77,30 @@ cors:
   # per-user data.
   allowed_origins: ""
 
+# ─── security (fleet §3.1 boot-refuse + F-RES-3 bearer gate) ────────────────
+# The shipped image binds `0.0.0.0:8080` so `docker compose up` works
+# out-of-the-box. Boot would normally REFUSE that combination (fleet §3.1)
+# because a non-loopback bind without an authentication story is one HTTP
+# request away from unauth SQL execution. `trust_network: true` opts out
+# of that check — it is a **promise** that a reverse proxy (Ruuter in
+# Bürokratt, nginx / Traefik / Envoy elsewhere) authenticates every
+# request BEFORE it reaches Resql.
+#
+# For a real production deployment you should either:
+#   1. Leave this line and put an authenticating proxy in front, OR
+#   2. Delete this line and set `inter_service_token_env` below to
+#      enable the built-in bearer gate, OR
+#   3. Delete this line and change `server.bind` to `127.0.0.1:8080` /
+#      `[::1]:8080` / `localhost:8080` (loopback → check auto-satisfied).
+#
+# The shipped demo image (SQLite in-memory, no persisted data) is a
+# `trust_network: true` deployment by design — it exists to let you
+# poke at the API from your host without further setup, not to serve
+# production traffic.
+security:
+  trust_network: true
+  # inter_service_token_env: RESQL_INTER_SERVICE_TOKEN
+
 logging:
   # tracing_subscriber EnvFilter directive. Overridable via RESQL_LOG env.
   level: "info,resql=debug"
