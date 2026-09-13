@@ -6,6 +6,171 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0-alpha] - 2026-09-13
+
+**Security release closing the h2ck.me v1 runtime break-test, log-attack
+pass, and fleet-strongholds adoption.** **Minor bump because several
+defaults tighten in ways that will make some `0.3.x-alpha` deployments
+refuse to boot** — most notably the new fleet §3.1 refuse-check
+(`server.bind` non-loopback + no auth story = boot fails), and
+`/openapi.json` returning 404 by default. See the
+[README "Upgrading to 0.4.0-alpha"](https://github.com/turnerrainer/Resql/blob/dev/README.md#upgrading)
+short list and
+[`CLAUDE.md` section 9-20](https://github.com/turnerrainer/Resql/blob/dev/CLAUDE.md#v1-runtime-break-test--log-attack-changes-pre-040-alpha)
+for grep recipes + the paste-in Python auditor.
+
+**New pre-boot health check:** `resql doctor -c path/to/resql.yaml`
+runs the same safety checks `serve` runs, never binds a port, and
+exits `0` / `1` / `2` for CI-friendly gating. Wire it in before
+upgrading.
+
+### Added (R8)
+
+- **Optional built-in rate limiter.** New config block
+  `rate_limit: { requests_per_second: u32, burst: u32 }` (default
+  `requests_per_second: 0` — disabled; the middleware isn't attached
+  and adds zero cost per request). When enabled, a global
+  process-wide token bucket caps sustained throughput at `rps` with
+  bucket size `burst` (auto-sizes to `2 * rps` when `burst: 0`).
+  Exhaustion returns `429 Too Many Requests` in the canonical
+  header-envelope shape (`X-Resql-Error-Code: TooManyRequestsException`)
+  plus an RFC 6585 `Retry-After` header. Health probes bypass the
+  bucket so LB liveness isn't affected by rate saturation. Scope is
+  deliberately global rather than per-IP: Resql almost always sees a
+  reverse proxy's IP, so per-IP buckets collapse to a single-key
+  cache. Operators who need per-caller rate limits should apply them
+  at the proxy where real client IPs are visible. R8.
+
+### Security (v1 log-attack pass — h2ck.me)
+
+- **User-controlled fields that land in WARN log lines and error
+  response headers are now length-capped and CRLF-stripped.** FN-LOG-1
+  and FN-LOG-2 in the v1 log-attack pass: a caller sending a 100 KB
+  JSON key or an absurdly long URL path would produce a 100 KB WARN
+  line and a 100 KB `X-Resql-Error-Message` header (cheap DoS for the
+  log store and rejected on size by some proxies). Now every path
+  where user input flows into a log-line or response-header goes
+  through the new `truncate_for_log` helper (cap at 1 KB with a
+  `[truncated N bytes]` marker), and CR/LF stripping runs before the
+  message hits the log template. Sanitiser for
+  `X-Resql-Error-Message` also caps at 1 KB with `...` marker so a
+  compliant peer / proxy will never reject the response on header
+  size. Server request logs already used `sanitize_log_value` on the
+  route — a per-line truncate to 512 chars has been added for the
+  same reason.
+
+### Security (v1 runtime break-test — h2ck.me)
+
+- **Shipped `resql.yaml` no longer contradicts the CHANGELOG's "closed
+  by default" copy.** Prior versions carried `allow_datasource_header:
+  true` (with no allowlist — every override 403s anyway) and
+  `cors.allowed_origins: "*"` (browser drive-by lane). The shipped file
+  now matches the code-level safe defaults: header routing left off,
+  CORS empty. Operators who need either lane opt in explicitly.
+  Additionally, the boot log emits one WARN per remaining permissive
+  knob (`security_warnings()`), starting with a "wildcard CORS opens
+  every origin" line whenever `allowed_origins == "*"`. FN1.
+- **Shipped `docker-compose.yml` now runs with `read_only: true`.** The
+  container rootfs is immutable — combined with the existing
+  `cap_drop: ALL` and `no-new-privileges` the compose file already set,
+  an RCE inside the resql process can no longer drop a payload
+  anywhere on disk. Previously `read_only` was commented out with a
+  note about SQLite needing to write to its DB file; the in-memory demo
+  doesn't need that, and file-backed SQLite users are now pointed at
+  the volume-mount pattern (write only to `/var/lib/resql/data`) so the
+  rest of the filesystem stays sealed. FN4.
+- **`/openapi.json` is now 404 by default; enable with
+  `admin.openapi_public: true`.** The endpoint previously returned the
+  full spec unauth — every registered SQL endpoint, every declared
+  parameter, every response shape — giving a network-reachable
+  attacker a free catalogue of the surface to probe. Now it follows
+  the same env-gate posture as `/datasources`: default off,
+  indistinguishable from a non-mounted route, opt-in per deployment.
+  Operators who need the spec (dev, staging, or behind a same-origin
+  reverse proxy that authenticates before it hits Resql) set
+  `admin.openapi_public: true`. FN3.
+- **413 (body too large) and 504 (request timeout) responses now use
+  the same header-envelope shape as every other error.** The two
+  layers `tower-http` provides — `RequestBodyLimitLayer` and
+  `TimeoutLayer` — emit their responses outside the router, so they
+  previously bypassed the ResqlError envelope: 413 was bare
+  `text/plain` "length limit exceeded", 504 was an empty body without
+  the two `X-Resql-Error-*` headers. Downstream DSLs had to
+  special-case those two paths. A new outer middleware reshapes any
+  non-2xx response missing `X-Resql-Error-Code` into the canonical
+  envelope: body swapped to `[]`, headers set to
+  `PayloadTooLargeException` / `RequestTimeoutException` (or the
+  status's canonical name for other 4xx/5xx cases). Idempotent —
+  ResqlError responses already carry the envelope and are untouched.
+  FN5.
+- **Method mismatch on an existing saved query now returns 405 with an
+  `Allow:` header** (RFC 7231 §7.4.1). Previously `GET /users/echo`
+  when only `POST /users/echo.sql` was registered returned 400
+  `ResqlRuntimeException: Saved query '/users/echo' does not exist` —
+  misleading, since the path IS registered under a different method.
+  Callers now see 405, `X-Resql-Error-Code: MethodNotAllowedException`,
+  and `Allow: POST` (or `GET, POST` when both variants exist). A GET
+  or POST to a truly unregistered path is unchanged (still 400
+  `ResqlRuntimeException / QueryNotFound`). FN6.
+
+### Added (fleet stronghold §8.2)
+
+- **`resql doctor` — pre-boot health check subcommand.** Parses the
+  config, runs the same safety checks `serve` runs (semantic
+  validation + `validate_runtime_posture` from fleet §3.1), and prints
+  compat-shim diagnostics in the same order they'd land in the boot
+  log. Never binds a port, never opens a datasource pool — deliberately
+  side-effect-free so ops teams can point it at a candidate config in
+  staging without disturbing anything. Exit-code contract: 0 = clean,
+  1 = hard error (parse failure or runtime-posture refuse), 2 =
+  warnings only with `--strict`. Wire into CI as a blocking gate
+  (`--strict`) or a non-blocking check (default). The `Command`
+  wrapper defaults to `serve` when no subcommand is given, so existing
+  invocations of `resql -c resql.yaml` still work unchanged.
+
+### Added (fleet stronghold §3.1)
+
+- **Boot refuses to start on a non-loopback bind without an
+  authentication story.** New `security.trust_network: bool` opt-out.
+  Boot fails fast (with an actionable message listing all three
+  satisfying postures) when `server.bind` is non-loopback AND
+  `security.inter_service_token_env` is unset AND
+  `security.trust_network` is not `true`. Semantic config parsing is
+  unchanged — the new check runs from `main.rs::validate_runtime_posture`
+  after parse, so compat-shim / fixture parses still succeed; only
+  the actual boot refuses. Closes the "public bind, no auth, oops"
+  failure mode the F-RES-3 finding flagged as the worst-case shape.
+
+### Added (v1 runtime break-test — h2ck.me)
+
+- **Optional inter-service bearer gate.** New config field
+  `security.inter_service_token_env: <ENV_VAR_NAME>`. When set, the
+  named env var's value becomes the required `Authorization: Bearer …`
+  token for every request except `/health` and `/healthz`; missing or
+  mismatched tokens return 401 `UnauthorizedException` with the
+  canonical header-envelope shape. Token comparison is constant-time on
+  equal-length inputs (length mismatch rejects up-front — token length
+  is not a secret). Boot refuses to start if the env var is unset or
+  empty, so a wired-but-unset gate can't silently disable itself. The
+  gate is OFF by default — Resql's design is "internal-only behind
+  Ruuter" and operators must opt in per deployment. Closes the F-RES-3
+  finding: a Resql that becomes network-reachable outside its intended
+  trust boundary (dev, staging with a misconfigured proxy, or an
+  unguarded Ruuter DSL) is no longer one `curl` away from unauth SQL
+  execution against every registered datasource.
+
+### Added (fleet stronghold §8.1)
+
+- **Extended boot-time WARN catalogue.** The `Config::security_warnings`
+  entry seeded by FN1 now covers four additional permissive knobs:
+  non-loopback `server.bind` without an auth gate; `admin.datasources_public: true`
+  (topology leak on an unauth endpoint); `logging.print_stack_trace: true`
+  (schema-name leak in error chains); any datasource carrying a
+  plaintext `password:` (Java-compat form; steer to `password_env`).
+  Each check emits one WARN at boot with the field name and the
+  actionable "fix by …" hint — matching the TIM / CronManager reference
+  pattern from the fleet stronghold guidance.
+
 ## [0.3.0-alpha] - 2026-09-10
 
 **Minor bump because the error-response wire shape changed.** Configs
@@ -289,7 +454,8 @@ Spring Boot service. Interface-compatible with the original for the SQL-file-to-
 - Container image signed with cosign keyless via GHA OIDC.
 - Trivy HIGH/CRITICAL scan gates image signing.
 
-[Unreleased]: https://github.com/turnerrainer/Resql/compare/v0.3.0-alpha...HEAD
+[Unreleased]: https://github.com/turnerrainer/Resql/compare/v0.4.0-alpha...HEAD
+[0.4.0-alpha]: https://github.com/turnerrainer/Resql/releases/tag/v0.4.0-alpha
 [0.3.0-alpha]: https://github.com/turnerrainer/Resql/releases/tag/v0.3.0-alpha
 [0.2.0-alpha]: https://github.com/turnerrainer/Resql/releases/tag/v0.2.0-alpha
 [0.1.2-alpha]: https://github.com/turnerrainer/Resql/releases/tag/v0.1.2-alpha
