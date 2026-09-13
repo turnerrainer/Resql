@@ -8,24 +8,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed (BREAKING for image inspection, not for callers)
 
-- **Runtime container base swapped from `debian:bookworm-slim` to
-  `gcr.io/distroless/cc-debian12:nonroot`.** Package count drops from
-  ~107 to ~15; image size ~120 MB → ~33 MB. Every fixable HIGH/CRITICAL
-  Trivy finding is closed AND every unfixable HIGH/CRITICAL that was
-  landing via `curl` / `libldap-2.5-0` / `libkrb5-*` / `libnghttp2-14`
-  / `libp11-kit0` / `perl-base` / `util-linux-extra` is gone with the
-  packages themselves. Remaining CVE surface: 0 HIGH, 0 CRITICAL, small
-  MEDIUM/LOW residue in glibc / libssl3 / libgcc (all `affected` /
-  `fix_deferred`, i.e. no upstream fix — unavoidable in a glibc runtime).
+- **Runtime container is now a fully-static musl binary on
+  `gcr.io/distroless/static-debian12:nonroot`.** Package set is
+  ca-certificates + tzdata + `/etc/passwd` — **no libc, no libssl3,
+  no libgcc/libstdc++, nothing that can carry a CVE**. Image size
+  ~120 MB (debian:bookworm-slim) → ~10 MB. **Trivy report is 0
+  findings at any severity, from any source**, and stays that way
+  forever (there is nothing left to be vulnerable in).
+  The resql binary is cross-compiled with musl-libc via
+  `messense/rust-musl-cross` for both `x86_64-unknown-linux-musl`
+  and `aarch64-unknown-linux-musl`; bundled SQLite (libsqlite3-sys)
+  builds cleanly against musl headers.
   **What breaks**: any operator who was `docker exec … sh` into the
-  container for debugging. Distroless has no shell. Use `docker run
-  --rm -it gcr.io/distroless/cc-debian12:debug-nonroot` (the debug tag
-  includes busybox) or a sidecar for troubleshooting.
+  container for debugging. `distroless/static` has no shell, no libc,
+  no dynamic linker — nothing to exec into. For debugging, run a
+  sidecar with the same volume mounts, or a one-off
+  `docker run --rm -it gcr.io/distroless/base-debian12:debug-nonroot`
+  container against the same config.
 - **Runtime user is now `nonroot` (UID 65532) instead of `resql` (UID
   1000).** Bind-mounted config/sql directories need to be readable by
   UID 65532. Docker + k8s handle this uniformly via `USER` + fsGroup;
   operators using host bind-mounts on custom UIDs will need to widen
   file permissions or use a `--chown` on the mount.
+- **tini removed from the runtime image.** distroless/static has no
+  package manager and there was no compelling reason to smuggle in a
+  tini binary: resql doesn't fork child processes (no zombies to
+  reap), and tokio's `shutdown_signal()` already forwards SIGTERM /
+  SIGINT to a graceful axum shutdown. The resql binary runs as PID 1.
 
 ### Added
 
@@ -39,16 +48,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **Dockerfile: `apt-get upgrade -y` in the build + tini-source stages.**
-  The debian:bookworm-slim base image can lag behind the Debian security
-  tracker by days-to-weeks; without an in-Dockerfile upgrade, freshly
-  built images ship packages Debian has ALREADY patched. This blocked
-  the v0.4.0-alpha publish on 2026-09-13 — Trivy's HIGH/CRITICAL gate
-  fired on `libpcre2-8-0` (CVE-2026-86145 + CVE-2026-89161, both fixed
-  in `10.42-1+deb12u1`). The distroless runtime base (added in the
-  same release) makes this less relevant on the runtime layer, but the
-  build stage + tini-source stage both keep the upgrade for the same
-  reason.
+- **v0.4.0-alpha publish blocked by Trivy HIGH gate on `libpcre2-8-0`
+  (CVE-2026-86145 + CVE-2026-89161).** Root-cause fix is the static
+  musl + distroless/static swap above — the runtime image no longer
+  contains libpcre2, or curl, or libldap, or libkrb5, or perl-base,
+  or util-linux, or glibc, or libssl3, or **any** Debian package that
+  could ship a CVE. Every fixable AND every unfixable HIGH/CRITICAL/
+  MEDIUM/LOW the debian:bookworm-slim base was carrying is gone.
 
 ## [0.4.0-alpha] - 2026-09-13
 

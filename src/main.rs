@@ -56,9 +56,9 @@ enum Command {
     /// Container-native HTTP health probe. Does a raw TCP+HTTP GET
     /// against the given URL and exits 0 if the response status is
     /// 2xx, 1 otherwise. Implemented with `std::net::TcpStream` so
-    /// it needs no shell + no curl — this lets the shipped container
-    /// image drop `curl` (and its whole libssl3/libldap/libkrb5/
-    /// libnghttp2 dep chain) and run on a distroless base.
+    /// it needs no shell + no curl — this is what lets the shipped
+    /// runtime image be `distroless/static` (no libc, no libssl3,
+    /// no curl → zero CVE surface).
     Health {
         /// URL to probe. Only http:// is supported.
         #[arg(long, default_value = "http://127.0.0.1:8080/health")]
@@ -282,10 +282,11 @@ fn init_tracing(level: &str, format: &str) {
 
 /// Container-native health check. Point `HEALTHCHECK CMD ["/app/resql",
 /// "health"]` at this. Uses only `std::net::TcpStream` and a hand-rolled
-/// HTTP/1.0 GET so the runtime image can be distroless (no shell, no
-/// curl, no wget). Returns 0 on 2xx, 1 otherwise; prints one diagnostic
-/// line on stderr so `docker inspect --format '{{.State.Health}}'` shows
-/// something meaningful when a probe fails.
+/// HTTP/1.0 GET so the runtime image can be `distroless/static` — no
+/// libc, no shell, no curl, no wget. Returns 0 on 2xx, 1 otherwise;
+/// prints one diagnostic line on stderr so `docker inspect
+/// --format '{{.State.Health}}'` shows something meaningful when a
+/// probe fails.
 fn health_check(url: &str, timeout_ms: u64) -> ExitCode {
     use std::io::{Read, Write};
     use std::net::{TcpStream, ToSocketAddrs};
