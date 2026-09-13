@@ -29,7 +29,7 @@ straight to `0.4.2-alpha`. Manual registry cleanup of the vulnerable
 container tags pushed because the multi-arch build failed at the
 Dockerfile parse step, before any push).
 
-## [0.4.1-alpha] - 2026-09-13 [NEVER SHIPPED]
+## [0.4.1-alpha] - 2026-09-13 (never shipped)
 
 **Never shipped.** Tagged `v0.4.1-alpha` on 2026-09-13 but the publish
 workflow failed at the multi-arch Dockerfile parse step (see
