@@ -50,6 +50,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   status's canonical name for other 4xx/5xx cases). Idempotent —
   ResqlError responses already carry the envelope and are untouched.
   FN5.
+- **Method mismatch on an existing saved query now returns 405 with an
+  `Allow:` header** (RFC 7231 §7.4.1). Previously `GET /users/echo`
+  when only `POST /users/echo.sql` was registered returned 400
+  `ResqlRuntimeException: Saved query '/users/echo' does not exist` —
+  misleading, since the path IS registered under a different method.
+  Callers now see 405, `X-Resql-Error-Code: MethodNotAllowedException`,
+  and `Allow: POST` (or `GET, POST` when both variants exist). A GET
+  or POST to a truly unregistered path is unchanged (still 400
+  `ResqlRuntimeException / QueryNotFound`). FN6.
 
 ### Added (fleet stronghold §8.2)
 

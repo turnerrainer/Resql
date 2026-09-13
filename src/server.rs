@@ -583,10 +583,28 @@ async fn dispatch(
     // Normalise project casing early so query lookup and datasource lookup
     // agree — Java's SavedQuery.getKey lowercased both segments.
     let project_key = project.to_ascii_lowercase();
-    let saved = state
-        .index
-        .get(method, &project_key, &tail)
-        .ok_or_else(|| ResqlError::QueryNotFound(format!("/{project}/{tail}")))?;
+    let saved = match state.index.get(method, &project_key, &tail) {
+        Some(q) => q,
+        None => {
+            // FN6 (RFC 7231 §7.4.1): if the path IS registered but under
+            // a different method, return 405 with an `Allow:` header
+            // listing the methods that work. Only fall through to 400
+            // QueryNotFound when the path is genuinely unknown.
+            let allowed = state.index.allowed_methods_for(&project_key, &tail);
+            if !allowed.is_empty() {
+                let allow_header = allowed
+                    .iter()
+                    .map(|m| m.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                return Err(ResqlError::MethodNotAllowed {
+                    path: format!("/{project}/{tail}"),
+                    allowed: allow_header,
+                });
+            }
+            return Err(ResqlError::QueryNotFound(format!("/{project}/{tail}")));
+        }
+    };
     let ds_name = choose_datasource(&state.config, &project_key, &headers)?;
     let pool = state
         .registry

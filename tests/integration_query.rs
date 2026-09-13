@@ -505,14 +505,26 @@ async fn deeply_nested_paths_work() {
 }
 
 #[tokio::test]
-async fn method_mismatch_returns_query_not_found() {
-    // Only POST is defined; GET the same path should 400 (not 405) to mirror
-    // Java behaviour where the query key is method-specific.
+async fn method_mismatch_returns_405_with_allow_header() {
+    // FN6 (v1 runtime break-test): method mismatch on an existing path
+    // now returns 405 with `Allow: <other method>` per RFC 7231 §7.4.1,
+    // superseding the earlier `400 ResqlRuntimeException / Saved query
+    // does not exist` shape that misleadingly claimed the path wasn't
+    // registered at all. A path that's truly unknown still returns 400.
     let app = TestAppBuilder::new()
         .with_sql("demo/POST/x.sql", "SELECT 1 AS n")
         .build()
         .await;
-    let (status, code, _message, _) = app.request_err("GET", "/demo/x", None, &[]).await;
-    assert_eq!(status, 400);
-    assert_eq!(code, "ResqlRuntimeException");
+    let (status, headers, _body) = app.request_full("GET", "/demo/x", None, &[]).await;
+    assert_eq!(status, 405);
+    assert_eq!(
+        headers
+            .get("x-resql-error-code")
+            .and_then(|v| v.to_str().ok()),
+        Some("MethodNotAllowedException"),
+    );
+    assert_eq!(
+        headers.get("allow").and_then(|v| v.to_str().ok()),
+        Some("POST"),
+    );
 }
