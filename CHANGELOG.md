@@ -6,6 +6,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1-alpha] - 2026-09-13
+
+**Container-hardening patch release.** No behavioural change to the HTTP
+API or config schema — every fix is in the shipped Docker image. The
+0.4.0-alpha container tag failed to publish because the
+`debian:bookworm-slim` base was carrying two `libpcre2-8-0` HIGH CVEs
+(Trivy `HIGH,CRITICAL --ignore-unfixed` gate). This release rewrites the
+runtime image from the ground up to eliminate that entire class of
+supply-chain risk: **the shipped image now contains zero Debian
+packages**, so future glibc / openssl / curl / util-linux CVEs cannot
+land in it at all.
+
+**What operators actually see**:
+
+- `docker.io/turnerrainer/resql:0.4.1-alpha` +
+  `ghcr.io/turnerrainer/resql:0.4.1-alpha` are cosign-signed keyless
+  via GHA OIDC (same as prior releases).
+- Trivy scan on the published image: **0 vulns / 0 secrets /
+  0 misconfigurations at any severity**.
+- Image size drops ~120 MB → **~11 MB**.
+- Runtime UID is now `65532` (`nonroot`), not `1000`.
+- No shell in the container — see the "breaking" note below for the
+  new debug workflow.
+- **The `0.4.0-alpha` container tag on both registries is unsigned
+  and known-vulnerable** (build+push happens before Trivy in the
+  publish workflow; the failed run left the images behind). Operators
+  should upgrade straight to `0.4.1-alpha` and treat any pull of
+  `:0.4.0-alpha` as invalid.
+
 ### Changed (BREAKING for image inspection, not for callers)
 
 - **Runtime container is now a fully-static musl binary on
@@ -504,7 +533,8 @@ Spring Boot service. Interface-compatible with the original for the SQL-file-to-
 - Container image signed with cosign keyless via GHA OIDC.
 - Trivy HIGH/CRITICAL scan gates image signing.
 
-[Unreleased]: https://github.com/turnerrainer/Resql/compare/v0.4.0-alpha...HEAD
+[Unreleased]: https://github.com/turnerrainer/Resql/compare/v0.4.1-alpha...HEAD
+[0.4.1-alpha]: https://github.com/turnerrainer/Resql/releases/tag/v0.4.1-alpha
 [0.4.0-alpha]: https://github.com/turnerrainer/Resql/releases/tag/v0.4.0-alpha
 [0.3.0-alpha]: https://github.com/turnerrainer/Resql/releases/tag/v0.3.0-alpha
 [0.2.0-alpha]: https://github.com/turnerrainer/Resql/releases/tag/v0.2.0-alpha
