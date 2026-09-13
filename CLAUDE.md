@@ -196,6 +196,222 @@ See `DIVERGENCES.md` DIV-022 for the source-of-truth rationale, and
 [`book/src/failure-modes.md`](book/src/failure-modes.md) for the
 operator-facing docs.
 
+## v1 runtime break-test + log-attack changes (pre-0.4.0-alpha)
+
+A second batch of h2ck.me findings landed in the `[Unreleased]` block
+of the CHANGELOG. Grouped by shape:
+
+### 9. Boot posture: refuse-non-loopback-without-auth (fleet §3.1)
+
+**New behaviour:** boot fails fast when `server.bind` is a non-loopback
+address AND no authentication story is configured. Three ways to
+satisfy the check:
+
+  (a) bind to loopback (`127.0.0.1`, `[::1]`, or `localhost`) and let
+      a reverse proxy forward traffic in,
+  (b) set `security.inter_service_token_env` (see item 10 below) to
+      enable the built-in bearer gate,
+  (c) set `security.trust_network: true` to certify that a reverse
+      proxy authenticates every request before it reaches Resql.
+
+The runtime-posture check runs from `main.rs::validate_runtime_posture`
+*after* `Config::from_yaml_str`, so a compat-shim reload or fixture
+parse still succeeds — only the actual `serve` boot refuses. Sample
+error:
+
+```
+Error: refusing to start on non-loopback bind 0.0.0.0:8080 without an
+authentication story. Do one of: (a) bind to 127.0.0.1:<port> and let
+a reverse proxy forward, (b) set security.inter_service_token_env to
+enable the built-in bearer gate, or (c) set security.trust_network:
+true to certify that a reverse proxy authenticates every request
+before it reaches Resql.
+```
+
+- **Grep to find affected configs**: `grep -H '^\s*bind:' resql.yaml`
+  — anything not `127.0.0.1:*` / `[::1]:*` / `localhost:*` must add
+  one of (b) or (c).
+- **Recommended fix for a proxy-fronted deployment**:
+  ```yaml
+  security:
+    trust_network: true
+  ```
+- Closes the "public bind, no auth, oops" shape F-RES-3 filed against.
+
+### 10. Optional inter-service bearer gate (F-RES-3)
+
+**New config block**:
+
+```yaml
+security:
+  # Env var name whose value is the required shared secret.
+  # Boot refuses if the env var is unset or empty.
+  inter_service_token_env: RESQL_INTER_SERVICE_TOKEN
+```
+
+When set, every request except `/health` and `/healthz` must carry
+`Authorization: Bearer <value-of-env-var>` or receive `401
+UnauthorizedException` in the standard header-envelope shape
+(`X-Resql-Error-Code: UnauthorizedException`). Comparison is
+constant-time on equal-length inputs. Log line on rejection never
+echoes the attempted token content.
+
+- **Off by default** — matches the pre-existing "internal-only,
+  behind Ruuter" design. Operators opt in per deployment.
+- Health probes bypass so LB liveness isn't affected.
+
+### 11. Extended boot-time WARN catalogue (fleet §8.1)
+
+Every knowingly permissive knob emits a WARN at boot:
+
+- `cors.allowed_origins == "*"` (FN1) — every origin can read every
+  response cross-origin.
+- `server.bind` non-loopback — see item 9 for the full check.
+- `admin.datasources_public: true` — even the redacted response
+  leaks backend topology to any unauth caller.
+- `logging.print_stack_trace: true` — error `source()` chains can
+  leak schema names / constraint names from the driver.
+- Any datasource carrying a plaintext `password:` (Java-compat form)
+  — steer to `password_env` so the secret never sits in a config
+  file.
+
+Nothing here changes behaviour; ops teams just see the same audit
+line at boot a reviewer would.
+
+### 12. `/openapi.json` gated behind `admin.openapi_public` (FN3)
+
+**New default:** 404 (indistinguishable from a non-mounted route).
+Operators who need the spec (dev, staging, or behind a same-origin
+proxy that authenticates upstream) set `admin.openapi_public: true`.
+
+Same env-gate posture as `/datasources` from R5 — closes the
+unauth-enumeration lane against the full endpoint catalogue.
+
+### 13. Shipped `docker-compose.yml` + `resql.yaml` re-hardened (FN1 + FN4)
+
+The shipped compose file now runs with `read_only: true` so an RCE
+inside resql can't drop a payload anywhere on disk. Shipped
+`resql.yaml` matches the code-level safe defaults (header routing
+off; CORS empty) — no more "config contradicts CHANGELOG" surprises
+for `docker compose up` operators.
+
+### 14. 405 with `Allow:` header on method mismatch (FN6, RFC 7231 §7.4.1)
+
+**Old behaviour:** `GET /users/echo` when only `POST /users/echo.sql`
+was registered returned `400 ResqlRuntimeException: Saved query
+'/users/echo' does not exist` — misleading, since the path IS
+registered under a different method.
+
+**New behaviour:** `405 Method Not Allowed`, header
+`X-Resql-Error-Code: MethodNotAllowedException`, plus the RFC-required
+`Allow: POST` (or `GET, POST` when both variants exist). A truly
+unregistered path still returns 400 QueryNotFound.
+
+**Caller impact:** clients that pattern-matched on the "does not
+exist" body/message text see a different status now. Clients that
+branch on HTTP status get a more informative code. Update tests
+accordingly.
+
+### 15. 413 + 504 responses use the header envelope (FN5)
+
+**Old behaviour:** `413 Payload Too Large` (from `tower-http`
+`RequestBodyLimitLayer`) came out as bare `text/plain` "length limit
+exceeded". `504 Gateway Timeout` (from `TimeoutLayer`) came out with
+an empty body and no `X-Resql-Error-*` headers. Downstream DSLs had
+to special-case those two paths.
+
+**New behaviour:** both use the standard header envelope — body →
+`[]`, headers →
+`PayloadTooLargeException` / `RequestTimeoutException` respectively.
+Consistent with every other ResqlError response.
+
+### 16. Log-line + error-header hardening (FN-LOG-1, FN-LOG-2)
+
+Every place where user input flows into a WARN log line or the
+`X-Resql-Error-Message` header is now length-capped at 1 KB and
+CRLF-stripped. A caller sending a 100 KB JSON key or an absurdly
+long URL path no longer produces a 100 KB log line (log-shipper DoS)
+or an oversized response header (rejected by some proxies).
+
+- Truncation marker: `[truncated N bytes]` (log lines) / `...`
+  (header value).
+- Uses `logging::truncate_for_log` + `logging::sanitize_log_value`.
+
+### 17. Security response headers on every response (fleet §5.1)
+
+Five browser-side defence headers on every response:
+
+- `Content-Security-Policy: default-src 'none'; frame-ancestors 'none'`
+- `Strict-Transport-Security: max-age=63072000; includeSubDomains`
+- `X-Frame-Options: DENY`
+- `X-Content-Type-Options: nosniff`
+- `Referrer-Policy: no-referrer`
+
+Cheap defence-in-depth against reverse-proxy misconfigurations that
+might serve JSON as `text/html`.
+
+### 18. `resql doctor` — pre-boot health check subcommand (fleet §8.2)
+
+New subcommand that parses the config, runs the same safety checks
+`serve` runs (`validate` + `validate_runtime_posture`), emits the
+same security-warning WARN catalogue, and prints compat-shim
+diagnostics. Never binds a port, never opens a pool. Exit codes:
+
+- `0` — every check passed.
+- `1` — hard error (parse failure, semantic validation, or
+  refuse-on-non-loopback-without-auth).
+- `2` — warnings only, with `--strict`.
+
+Backwards-compat: `resql -c resql.yaml` (no subcommand) still runs
+`serve` — the `Command` wrapper defaults to it.
+
+### 19. Optional built-in rate limiter (R8)
+
+**New config block**:
+
+```yaml
+rate_limit:
+  requests_per_second: 100   # 0 (default) = disabled
+  burst: 200                 # 0 = auto-size to 2 * rps
+```
+
+When enabled, a global process-wide token bucket caps sustained
+throughput. Exhaustion returns `429 Too Many Requests` in the header
+envelope, with an RFC 6585 `Retry-After` header. Health probes
+bypass.
+
+**Scope is global (per-process), not per-IP.** Resql almost always
+sees a reverse proxy as the caller, so per-IP buckets would collapse
+to a single-key cache. Operators who need per-caller limits should
+apply them at the proxy where real client IPs are visible.
+
+### 20. FN2 — SECURITY.md documents the delegate-auth model
+
+`SECURITY.md` now has a prominent "Authentication model — READ THIS
+BEFORE DEPLOYING" section listing the two safe deployment topologies
+(behind proxy / built-in bearer) plus an endpoint × auth-status
+table. Point new operators here before they hit `docker compose up`.
+
+### Fastest audit grep for the new posture
+
+```bash
+# 1. Boot-refuse: any non-loopback bind without an auth story
+python3 - <<'PY'
+import yaml
+cfg = yaml.safe_load(open('resql.yaml'))
+bind = cfg.get('server', {}).get('bind', '0.0.0.0:8080')
+host = bind.split('[')[1].split(']')[0] if bind.startswith('[') else bind.rsplit(':', 1)[0]
+loopback = host in ('127.0.0.1', '::1', 'localhost')
+sec = cfg.get('security', {})
+has_bearer = bool(sec.get('inter_service_token_env'))
+trust_net = bool(sec.get('trust_network'))
+if not loopback and not has_bearer and not trust_net:
+    print(f"BOOT WILL REFUSE: bind={bind} + no auth story. Fix per items 9/10 above.")
+else:
+    print("boot-posture OK")
+PY
+```
+
 ## Fastest way to audit a live config
 
 ```bash
@@ -307,8 +523,41 @@ cors:
 # trust boundary rely on it — and even then the response is redacted
 # (`jdbcUrl` → scheme+host, `username` → empty). The un-redacted view
 # lives in the startup INFO log.
+#
+# /openapi.json is also 404 by default (FN3) — flipping it on hands an
+# unauth caller the full endpoint catalogue with every declared param.
+# Leave off in production; enable only inside a trust boundary that
+# authenticates before it hits Resql.
 admin:
   datasources_public: false
+  openapi_public: false
+
+# ─── security (auth, boot-refuse, trust-network) ────────────────────────────
+# Resql's default posture is "internal-only, sitting behind Ruuter." The
+# fields below are opt-in departures from that posture. See CLAUDE.md
+# items 9 + 10 for the full picture.
+security:
+  # Env var name that carries the shared secret for the inter-service
+  # bearer gate (F-RES-3). When set, every request except /health and
+  # /healthz MUST carry `Authorization: Bearer <env-var-value>`. Leave
+  # empty (default) for the "no built-in auth" posture. Boot refuses if
+  # the env var is unset or empty when this field is set.
+  inter_service_token_env: ""
+  # Certify that a reverse proxy authenticates every request before it
+  # reaches Resql. Required when server.bind is non-loopback AND
+  # inter_service_token_env is empty — otherwise boot refuses.
+  # For loopback binds (127.0.0.1 / [::1] / localhost) this field is
+  # irrelevant.
+  trust_network: false
+
+# ─── rate limiter (R8) ───────────────────────────────────────────────────────
+# Global process-wide token bucket. Off by default (rps=0). Meant for
+# deployments that ever face callers directly; if you're behind a
+# reverse proxy that already rate-limits per caller, leave this off.
+# When enabled, exhaustion returns 429 with a Retry-After header.
+# rate_limit:
+#   requests_per_second: 100    # 0 disables the middleware entirely
+#   burst: 200                  # 0 auto-sizes to 2 * rps
 
 # ─── logging ─────────────────────────────────────────────────────────────────
 logging:
@@ -370,6 +619,8 @@ datasource_header_allowlist:
 ### What NOT to do
 
 - **Never** set `password:` (plaintext). Always `password_env:`.
+- **Never** set `security.inter_service_token_env:` and forget to set the env var — boot refuses. Set the env var to a random 32-byte value (`openssl rand -base64 32`) and roll it on a schedule.
+- **Never** set `security.trust_network: true` without an actual reverse proxy in front — you turn off the boot-time refuse-check and the deployment is one HTTP request away from unauth SQL execution.
 - **Never** set `allow_datasource_header: true` without also setting `datasource_header_allowlist`. Enabling the header without the allowlist means every override 403s — worse UX than leaving the header off entirely.
 - **Never** set `request_timeout_seconds: 0`. Boot fails; the check exists because the alternative is pool exhaustion.
 - **Never** set `admin.datasources_public: true` on an internet-facing service. If ops needs the view, expose it via a separate internal-only route on the reverse proxy.
@@ -385,6 +636,8 @@ Standard Rust workflow. Before touching code:
 - `cargo test --no-fail-fast --locked` (SQLite integration only — Postgres tests skip cleanly without `TEST_POSTGRES_URL`)
 
 `dev` is the default branch and is **push-protected** — you MUST land changes via PR. There is no direct push.
+
+**Pre-boot check for candidate configs**: `cargo run --bin resql -- doctor -c path/to/resql.yaml` (or, from a compiled image, `resql doctor -c ...`). Runs the same safety checks `serve` runs (parse + `validate_runtime_posture` + security_warnings), never binds a port, exits 0/1/2 for CI-friendly gates. Wire into CI as `resql doctor --strict` for a warnings-are-errors gate, or without `--strict` for informational.
 
 ## Post-audit repo hygiene facts
 
