@@ -8,16 +8,23 @@
 # The shipped configuration wires up TWO SQLite-in-memory datasources
 # (`users` and `audit`) to demonstrate multi-database routing out of the
 # box. `POST /users/echo` and `POST /audit/write` route to different
-# backends by URL segment; add an `X-Datasource: <name>` header to
-# override.
+# backends by URL segment.
+#
+# **This file matches the code-level SAFE DEFAULTS.** If you were
+# reading the shipped file before v0.3.1-alpha it enabled two lanes
+# — `allow_datasource_header: true` and `cors.allowed_origins: "*"` —
+# that contradicted the CHANGELOG's "closed by default" posture. If a
+# specific deployment needs either lane, uncomment the field and set
+# the value explicitly; the code will WARN loudly at boot when either
+# knob is turned on for a non-loopback bind.
 
 server:
   # Bind address and port for the HTTP listener.
   bind: "0.0.0.0:8080"
   # Max inbound JSON body size (bytes). Enforced by tower-http RequestBodyLimit.
-  # Overflow returns 413.
+  # Overflow returns 413 with the same header-envelope shape as any other error.
   max_body_bytes: 1048576
-  # Per-request wall-clock timeout (seconds). 0 disables.
+  # Per-request wall-clock timeout (seconds). Must be > 0; boot refuses 0.
   request_timeout_seconds: 30
 
 # Directory to scan for SQL files.
@@ -31,9 +38,15 @@ sql_dir: "./sql"
 # UnknownDataSourceName.
 project_datasource_map: {}
 
-# Optional: allow per-request datasource override via the X-Datasource
-# header. When false the header is ignored.
-allow_datasource_header: true
+# Header-driven datasource routing is DISABLED by default (lateral-move
+# lane inside the trust boundary). Enable per-deployment only when you
+# need it, and always alongside a `datasource_header_allowlist` — every
+# override that isn't allow-listed returns 403.
+#
+# allow_datasource_header: true
+# datasource_header_allowlist:
+#   users: [users, users_replica]
+#   audit: [audit]
 
 datasources:
   # Primary backend for the `users` URL project. SQLite in-memory in the
@@ -55,8 +68,14 @@ datasources:
     acquire_timeout_seconds: 5
 
 cors:
-  # "*" allows any origin. Comma-separated list of exact origins otherwise.
-  allowed_origins: "*"
+  # Empty (default) = no CORS layer attached — browsers refuse cross-origin
+  # reads, which is what you want for a service that sits behind a reverse
+  # proxy. Set to a comma-separated allowlist of exact origins for
+  # browser-facing deployments (e.g. "https://app.example.com"). The
+  # wildcard "*" is still supported but the boot log WARNs loudly because
+  # it opens every origin — never appropriate for a service that returns
+  # per-user data.
+  allowed_origins: ""
 
 logging:
   # tracing_subscriber EnvFilter directive. Overridable via RESQL_LOG env.

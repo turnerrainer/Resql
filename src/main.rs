@@ -117,6 +117,15 @@ async fn run_serve(config: Option<&PathBuf>) -> Result<()> {
         }
     }
 
+    // Boot-time security-posture warnings. FN1 in the h2ck.me v1 runtime
+    // pass — the shipped resql.yaml set `cors.allowed_origins: "*"` while
+    // the CHANGELOG claimed CORS defaulted to closed. Now every knowingly
+    // permissive knob emits one WARN so ops teams see the same audit line
+    // a reviewer would.
+    for w in cfg.security_warnings() {
+        warn!(field = %w.field, "{}", w.message);
+    }
+
     // Fleet stronghold §3.1: fail fast before we bind a public
     // interface with no authentication story. `validate()` handles
     // semantic checks; this method covers the deployment posture and
@@ -197,13 +206,13 @@ fn doctor(config: Option<&PathBuf>, strict: bool) -> ExitCode {
         println!("{level}: [compat] {}: {}", d.source_field, d.message);
     }
 
-    // NOTE: `Config::security_warnings()` (fleet §8.1, PR #40 stacked
-    // on #32) is not on this branch. When those merge to dev this
-    // doctor should loop `for w in cfg.security_warnings() { warnings
-    // += 1; println!("WARN: [security] {}: {}", w.field, w.message); }`
-    // right here. Stub kept explicit so the follow-up is a one-line
-    // change.
-    let warnings = 0usize;
+    // Security-posture WARN catalogue (FN1 + fleet §8.1). One line per
+    // knowingly permissive knob; same catalogue `serve` emits at boot.
+    let mut warnings = 0usize;
+    for w in cfg.security_warnings() {
+        warnings += 1;
+        println!("WARN: [security] {}: {}", w.field, w.message);
+    }
 
     match cfg.validate_runtime_posture() {
         Ok(()) => {
