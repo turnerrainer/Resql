@@ -19,7 +19,9 @@ use crate::db::{DatasourceRegistry, SharedRegistry};
 use crate::error::{ResqlError, ERROR_CODE_HEADER, ERROR_MESSAGE_HEADER};
 use crate::health::{self, StartTime};
 use crate::loader::{HttpMethod, QueryIndex};
-use crate::logging::{generate_traceparent, sanitize_log_value, trace_id_from_traceparent};
+use crate::logging::{
+    generate_traceparent, sanitize_log_value, trace_id_from_traceparent, truncate_for_log,
+};
 use crate::openapi;
 use crate::query;
 
@@ -340,7 +342,7 @@ async fn request_observability(cfg: LoggingConfig, mut req: Request, next: Next)
     let request_span = tracing::info_span!(
         "http_request",
         http.request.method = %method_str,
-        http.route = %sanitize_log_value(&uri_path),
+        http.route = %truncate_for_log(&sanitize_log_value(&uri_path), 512),
         resql.project = %project_str,
         trace_id = %trace_id_str,
     );
@@ -368,7 +370,7 @@ async fn request_observability(cfg: LoggingConfig, mut req: Request, next: Next)
         if status >= 500 {
             tracing::warn!(
                 http.request.method = %method_str,
-                http.route = %sanitize_log_value(&uri_path),
+                http.route = %truncate_for_log(&sanitize_log_value(&uri_path), 512),
                 http.response.status_code = status,
                 duration_ms,
                 resql.project = %project_str,
@@ -378,7 +380,7 @@ async fn request_observability(cfg: LoggingConfig, mut req: Request, next: Next)
         } else {
             tracing::info!(
                 http.request.method = %method_str,
-                http.route = %sanitize_log_value(&uri_path),
+                http.route = %truncate_for_log(&sanitize_log_value(&uri_path), 512),
                 http.response.status_code = status,
                 duration_ms,
                 resql.project = %project_str,
@@ -680,10 +682,16 @@ fn choose_datasource(
                     .get(project)
                     .map(|v| v.as_slice())
                     .unwrap_or(&[]);
+                // FN-LOG-1: `trimmed` is a caller-supplied header
+                // value. HTTP already restricts it to visible ASCII,
+                // but nothing bounds its length — a very long value
+                // would balloon the log line and (below) the error's
+                // header echo. Cap for logging + downstream reuse.
+                let logged_override = truncate_for_log(trimmed, 256);
                 if !allowed.iter().any(|d| d == trimmed) {
                     tracing::warn!(
                         resql.project = %project,
-                        override_to = %trimmed,
+                        override_to = %logged_override,
                         "X-Datasource override rejected: not in allowlist"
                     );
                     return Err(ResqlError::ForbiddenDatasourceOverride {
@@ -693,7 +701,7 @@ fn choose_datasource(
                 }
                 tracing::info!(
                     resql.project = %project,
-                    override_to = %trimmed,
+                    override_to = %logged_override,
                     "X-Datasource override accepted"
                 );
                 return Ok(trimmed.to_string());

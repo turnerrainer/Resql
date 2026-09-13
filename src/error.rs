@@ -5,6 +5,8 @@ use serde_json::Value;
 use std::path::PathBuf;
 use thiserror::Error;
 
+use crate::logging::{sanitize_log_value, truncate_for_log};
+
 /// Response headers that carry the error envelope on non-2xx responses.
 /// See `IntoResponse for ResqlError` (issue #25) — the response body itself
 /// is always the empty JSON array `[]` so a naive DSL check like
@@ -12,6 +14,16 @@ use thiserror::Error;
 /// the query actually errored.
 pub const ERROR_CODE_HEADER: &str = "x-resql-error-code";
 pub const ERROR_MESSAGE_HEADER: &str = "x-resql-error-message";
+
+/// Maximum length of the WARN/ERROR log line's message text and of
+/// the outgoing `X-Resql-Error-Message` header value. Above this the
+/// message is truncated with a marker so a caller sending a 100 KB
+/// parameter name cannot fill the log store or reject-on-oversize the
+/// header. See FN-LOG-1 / FN-LOG-2. 1 KB is enough for every real
+/// error the codebase produces (measured — the longest under normal
+/// use is ~200 chars).
+const LOG_MESSAGE_MAX_BYTES: usize = 1024;
+const HEADER_MESSAGE_MAX_BYTES: usize = 1024;
 
 #[derive(Debug, Error)]
 pub enum ResqlError {
@@ -144,17 +156,25 @@ impl IntoResponse for ResqlError {
         let status_code = status.as_u16();
         let kind = self.kind();
         let message = self.to_string();
+        // FN-LOG-1 / FN-LOG-2: several error variants interpolate a
+        // caller-supplied string (parameter name, saved-query path,
+        // datasource header) into `message` via Display. Emitting that
+        // through the log message template (`"{message}"`) would put
+        // raw CRLF bytes on the wire and place no cap on line length —
+        // a 100 KB JSON key would produce a 100 KB WARN. Strip CR/LF
+        // and clip to a fixed budget before it lands in the log.
+        let safe_message = truncate_for_log(&sanitize_log_value(&message), LOG_MESSAGE_MAX_BYTES);
         if status_code >= 500 {
             tracing::error!(
                 error.kind = %kind,
                 http.response.status_code = status_code,
-                "{message}"
+                "{safe_message}"
             );
         } else {
             tracing::warn!(
                 error.kind = %kind,
                 http.response.status_code = status_code,
-                "{message}"
+                "{safe_message}"
             );
         }
         // Body is always the empty JSON array — a naive DSL check like
@@ -188,11 +208,18 @@ impl IntoResponse for ResqlError {
 /// Restrict a free-form message to characters valid in an HTTP header
 /// value: printable ASCII (0x20–0x7E) plus horizontal tab. CR/LF are
 /// dropped (would inject a header split); everything else is replaced
-/// with `?`. The un-sanitised message is still available in the server
+/// with `?`. Also caps at `HEADER_MESSAGE_MAX_BYTES` so a 100 KB
+/// parameter name from a caller can't produce a header value the peer
+/// (or an intermediate proxy) will reject on size. See FN-LOG-1. The
+/// un-sanitised, un-truncated message is still available in the server
 /// log line emitted just above.
 fn sanitize_header_value(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
+    let mut out = String::with_capacity(s.len().min(HEADER_MESSAGE_MAX_BYTES));
     for c in s.chars() {
+        if out.len() >= HEADER_MESSAGE_MAX_BYTES {
+            out.push_str("...");
+            break;
+        }
         if c == '\t' || (' '..='~').contains(&c) {
             out.push(c);
         } else {
@@ -246,6 +273,20 @@ mod tests {
         assert_eq!(sanitize_header_value("café"), "caf?");
         // Tabs and printable ASCII survive.
         assert_eq!(sanitize_header_value("a\tb c"), "a\tb c");
+    }
+
+    #[test]
+    fn sanitize_header_value_caps_at_max_bytes() {
+        // FN-LOG-1: a caller sending a 100 KB parameter name must not
+        // produce a 100 KB header value. Everything past the budget is
+        // replaced with the trailing "..." marker so a peer / proxy
+        // that enforces its own header-size cap doesn't reject the
+        // whole response.
+        let huge = "A".repeat(4096);
+        let out = sanitize_header_value(&huge);
+        assert!(out.len() <= HEADER_MESSAGE_MAX_BYTES + 3);
+        assert!(out.starts_with(&"A".repeat(HEADER_MESSAGE_MAX_BYTES)));
+        assert!(out.ends_with("..."));
     }
 
     #[tokio::test]

@@ -177,6 +177,53 @@ async fn malformed_json_returns_400() {
 }
 
 #[tokio::test]
+async fn fn_log_unknown_param_name_bounded_and_no_crlf_in_header() {
+    // FN-LOG-1: a caller sending a 100 KB JSON key must not produce
+    // a 100 KB WARN log line or a 100 KB response header. Both the log
+    // message (via truncate_for_log) and the X-Resql-Error-Message
+    // header (via sanitize_header_value's cap) are bounded, and any
+    // CRLF the caller tries to smuggle through — impossible here
+    // because serde_json rejects raw CRLF in JSON strings, but let's
+    // also probe printable-ASCII injection tokens.
+    let app = TestAppBuilder::new()
+        .with_sql("demo/POST/x.sql", "SELECT :used AS u")
+        .build()
+        .await;
+    let big_name = "abc'; SEVERITY=CRITICAL - ".repeat(400); // ~10 KB
+    let body = format!(r#"{{"used":"42","{big_name}":"hi"}}"#);
+    let (status, code, message, _) = app.request_err("POST", "/demo/x", Some(&body), &[]).await;
+    assert_eq!(status, 400);
+    assert_eq!(code, "UnknownParameterException");
+    // Header must be bounded (~1 KB + marker); must not contain CR/LF.
+    assert!(
+        message.len() <= 1100,
+        "message header must be bounded, got {} bytes",
+        message.len()
+    );
+    assert!(!message.contains('\r') && !message.contains('\n'));
+}
+
+#[tokio::test]
+async fn fn_log_query_not_found_path_bounded_in_header() {
+    // FN-LOG-2: a caller hitting an absurdly long URL path shouldn't
+    // produce an oversized X-Resql-Error-Message header either.
+    let app = TestAppBuilder::new()
+        .with_sql("demo/POST/x.sql", "SELECT 1 AS n")
+        .build()
+        .await;
+    let long_tail = "z".repeat(4096);
+    let path = format!("/demo/{long_tail}");
+    let (status, code, message, _) = app.request_err("POST", &path, Some("{}"), &[]).await;
+    assert_eq!(status, 400);
+    assert_eq!(code, "ResqlRuntimeException");
+    assert!(
+        message.len() <= 1100,
+        "message header must be bounded, got {} bytes",
+        message.len()
+    );
+}
+
+#[tokio::test]
 async fn extra_body_params_rejected() {
     // Task 008 tightens the runtime: unknown keys are no longer
     // silently dropped, they surface as `UnknownParameterException`.
