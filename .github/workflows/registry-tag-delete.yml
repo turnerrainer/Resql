@@ -1,0 +1,99 @@
+name: registry-tag-delete
+
+# One-shot manual workflow to delete a specific tag from both
+# docker.io/turnerrainer/resql AND ghcr.io/turnerrainer/resql — the
+# authenticated automation surface for post-hoc cleanup of a botched
+# publish. Add + dispatch + verify + remove after use.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to delete (e.g. 0.4.0-alpha)"
+        required: true
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  delete:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete Docker Hub tag
+        env:
+          TAG: ${{ inputs.tag }}
+          USER: ${{ secrets.DOCKERHUB_USERNAME }}
+          PAT:  ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "$USER" ] || [ -z "$PAT" ]; then
+            echo "::error::DOCKERHUB_USERNAME or DOCKERHUB_TOKEN not set"; exit 1
+          fi
+          JWT=$(curl -sSf -X POST -H "Content-Type: application/json" \
+                 -d "{\"username\":\"$USER\",\"password\":\"$PAT\"}" \
+                 https://hub.docker.com/v2/users/login/ | jq -r .token)
+          if [ -z "$JWT" ] || [ "$JWT" = "null" ]; then
+            echo "::error::Docker Hub login returned empty JWT"; exit 1
+          fi
+          code=$(curl -sS -o /tmp/dh.out -w '%{http_code}' -X DELETE \
+                   -H "Authorization: JWT $JWT" \
+                   "https://hub.docker.com/v2/repositories/turnerrainer/resql/tags/${TAG}/")
+          case "$code" in
+            204) echo "docker.io: tag ${TAG} deleted (204)";;
+            404) echo "docker.io: tag ${TAG} not found (already gone)";;
+            *)   echo "::error::docker.io delete returned $code"; cat /tmp/dh.out; exit 1;;
+          esac
+
+      - name: Delete GHCR versions (probe with GITHUB_TOKEN, fall back to GHCR_DELETE_PAT)
+        env:
+          TAG:              ${{ inputs.tag }}
+          GITHUB_TOKEN:     ${{ secrets.GITHUB_TOKEN }}
+          GHCR_DELETE_PAT:  ${{ secrets.GHCR_DELETE_PAT }}
+        run: |
+          set -euo pipefail
+          # Choose the token that has actual delete authority. GITHUB_TOKEN
+          # with `packages: write` in modern GHCR CAN delete versions of a
+          # package linked to the repository — try it first. If we get 403,
+          # fall back to GHCR_DELETE_PAT (a PAT with delete:packages scope
+          # that the operator can add if needed).
+          for TOKEN_NAME in GITHUB_TOKEN GHCR_DELETE_PAT; do
+            TOKEN=$(eval echo \${$TOKEN_NAME})
+            if [ -z "$TOKEN" ]; then
+              echo "trying $TOKEN_NAME: not set, skipping"
+              continue
+            fi
+            echo "trying $TOKEN_NAME:"
+
+            VIDS=$(curl -sSf \
+                     -H "Accept: application/vnd.github+json" \
+                     -H "Authorization: Bearer $TOKEN" \
+                     "https://api.github.com/users/turnerrainer/packages/container/resql/versions?per_page=100" \
+                   | jq -r --arg t "$TAG" '.[] | select(.metadata.container.tags[]? == $t) | .id')
+
+            if [ -z "$VIDS" ]; then
+              echo "  no versions tagged ${TAG} — nothing to delete on GHCR"
+              exit 0
+            fi
+
+            all_ok=1
+            for VID in $VIDS; do
+              code=$(curl -sS -o /tmp/ghcr.out -w '%{http_code}' -X DELETE \
+                       -H "Accept: application/vnd.github+json" \
+                       -H "Authorization: Bearer $TOKEN" \
+                       "https://api.github.com/users/turnerrainer/packages/container/resql/versions/$VID")
+              case "$code" in
+                204) echo "  ghcr version $VID: deleted";;
+                403) echo "  ghcr version $VID: 403 forbidden with $TOKEN_NAME (needs delete:packages scope)"; all_ok=0; break;;
+                404) echo "  ghcr version $VID: 404 (already gone)";;
+                *)   echo "  ghcr version $VID: unexpected $code"; cat /tmp/ghcr.out; all_ok=0; break;;
+              esac
+            done
+
+            if [ "$all_ok" = "1" ]; then
+              echo "GHCR delete succeeded via $TOKEN_NAME"
+              exit 0
+            fi
+          done
+          echo "::error::All token strategies exhausted. Add GHCR_DELETE_PAT secret (a PAT with delete:packages scope) and re-dispatch."
+          exit 1
