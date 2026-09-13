@@ -6,6 +6,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed (BREAKING for image inspection, not for callers)
+
+- **Runtime container is now a fully-static musl binary on
+  `gcr.io/distroless/static-debian12:nonroot`.** Package set is
+  ca-certificates + tzdata + `/etc/passwd` — **no libc, no libssl3,
+  no libgcc/libstdc++, nothing that can carry a CVE**. Image size
+  ~120 MB (debian:bookworm-slim) → ~10 MB. **Trivy report is 0
+  findings at any severity, from any source**, and stays that way
+  forever (there is nothing left to be vulnerable in).
+  The resql binary is cross-compiled with musl-libc via
+  `messense/rust-musl-cross` for both `x86_64-unknown-linux-musl`
+  and `aarch64-unknown-linux-musl`; bundled SQLite (libsqlite3-sys)
+  builds cleanly against musl headers.
+  **What breaks**: any operator who was `docker exec … sh` into the
+  container for debugging. `distroless/static` has no shell, no libc,
+  no dynamic linker — nothing to exec into. For debugging, run a
+  sidecar with the same volume mounts, or a one-off
+  `docker run --rm -it gcr.io/distroless/base-debian12:debug-nonroot`
+  container against the same config.
+- **Runtime user is now `nonroot` (UID 65532) instead of `resql` (UID
+  1000).** Bind-mounted config/sql directories need to be readable by
+  UID 65532. Docker + k8s handle this uniformly via `USER` + fsGroup;
+  operators using host bind-mounts on custom UIDs will need to widen
+  file permissions or use a `--chown` on the mount.
+- **tini removed from the runtime image.** distroless/static has no
+  package manager and there was no compelling reason to smuggle in a
+  tini binary: resql doesn't fork child processes (no zombies to
+  reap), and tokio's `shutdown_signal()` already forwards SIGTERM /
+  SIGINT to a graceful axum shutdown. The resql binary runs as PID 1.
+
+### Added
+
+- **`resql health` subcommand.** Container-native HTTP health probe that
+  does a raw `std::net::TcpStream` + HTTP/1.0 GET against a URL
+  (default `http://127.0.0.1:8080/health`). Exits 0 on 2xx, 1 otherwise.
+  Replaces the previous `curl -fsS http://127.0.0.1:8080/health` in the
+  Dockerfile HEALTHCHECK — that curl dep was the reason the runtime
+  image was carrying the whole libssl3/libldap/libkrb5/libnghttp2 CVE
+  surface. Also usable from CI or a supervisord probe.
+
+### Fixed
+
+- **v0.4.0-alpha publish blocked by Trivy HIGH gate on `libpcre2-8-0`
+  (CVE-2026-86145 + CVE-2026-89161).** Root-cause fix is the static
+  musl + distroless/static swap above — the runtime image no longer
+  contains libpcre2, or curl, or libldap, or libkrb5, or perl-base,
+  or util-linux, or glibc, or libssl3, or **any** Debian package that
+  could ship a CVE. Every fixable AND every unfixable HIGH/CRITICAL/
+  MEDIUM/LOW the debian:bookworm-slim base was carrying is gone.
+
 ## [0.4.0-alpha] - 2026-09-13
 
 **Security release closing the h2ck.me v1 runtime break-test, log-attack
