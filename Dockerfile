@@ -1,42 +1,67 @@
 # syntax=docker/dockerfile:1.7-labs
 
 # ─────────────────────────────────────────────────────────────
-# Build stage — musl cross-compile via messense/rust-musl-cross.
-# One builder variant per target arch (BuildKit picks via
-# `$TARGETARCH` — auto-set by `docker buildx build --platform
-# linux/amd64,linux/arm64`; the ARG declaration below is what
-# lets us interpolate it into the FROM line). The messense image
-# ships pre-built musl toolchains for both arches so
-# libsqlite3-sys builds bundled SQLite against musl headers/libs
-# cleanly.
+# Build stage — cross-compile Rust → musl for TARGETARCH using
+# cargo-zigbuild (zig as C cross-compiler). libsqlite3-sys's
+# bundled SQLite builds cleanly for either amd64 or arm64 from a
+# single amd64 host, no QEMU emulation.
+#
+# `--platform=$BUILDPLATFORM` pins the builder to the runner's
+# native arch (amd64 on GitHub-hosted runners). buildx still spawns
+# one build per --platform value in the outer invocation; each gets
+# its own auto-set TARGETARCH inside the RUN below.
+#
+# NOTE: the previous attempt used per-arch builder stages selected
+# via `FROM builder-${TARGETARCH}`. BuildKit resolves the stage
+# graph BEFORE per-stage TARGETARCH is populated, so that pattern
+# fails at graph-solve time ("failed to parse stage name
+# 'builder-': invalid reference format"). Single builder + runtime
+# arch-dispatch inside RUN is the working shape.
 # ─────────────────────────────────────────────────────────────
-ARG TARGETARCH
-
-FROM --platform=$BUILDPLATFORM messense/rust-musl-cross:x86_64-musl AS builder-amd64
-ENV RUSTC_TARGET=x86_64-unknown-linux-musl
-
-FROM --platform=$BUILDPLATFORM messense/rust-musl-cross:aarch64-musl AS builder-arm64
-ENV RUSTC_TARGET=aarch64-unknown-linux-musl
-
-FROM builder-${TARGETARCH} AS builder
+FROM --platform=$BUILDPLATFORM rust:1.88-slim AS builder
 WORKDIR /build
+
+RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends \
+        ca-certificates curl xz-utils \
+    && rm -rf /var/lib/apt/lists/*
+
+# Zig, pinned. Used by cargo-zigbuild as the C cross-compiler for
+# libsqlite3-sys' bundled SQLite build.
+ARG ZIG_VERSION=0.13.0
+RUN curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-linux-x86_64-${ZIG_VERSION}.tar.xz" \
+        | tar -xJ -C /opt \
+    && ln -s "/opt/zig-linux-x86_64-${ZIG_VERSION}/zig" /usr/local/bin/zig
+
+# cargo-zigbuild wraps cargo build with zig-as-CC for the target.
+# --locked avoids picking up unexpected dep updates during install.
+RUN cargo install --locked cargo-zigbuild --version 0.23.4 \
+    && rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl
+
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
-RUN cargo build --release --locked --bin resql --target $RUSTC_TARGET \
-    && cp target/$RUSTC_TARGET/release/resql /tmp/resql \
-    && strip /tmp/resql
+
+# TARGETARCH is auto-populated by buildx per platform invocation.
+# Cargo.toml already has `strip = "symbols"` in [profile.release] so
+# no explicit strip step is needed (cross-arch strip on an amd64 host
+# would need target-specific binutils anyway).
+ARG TARGETARCH
+RUN case "$TARGETARCH" in \
+        amd64) TARGET=x86_64-unknown-linux-musl ;; \
+        arm64) TARGET=aarch64-unknown-linux-musl ;; \
+        *) echo "unsupported TARGETARCH: '$TARGETARCH'" >&2 && exit 1 ;; \
+    esac \
+    && cargo zigbuild --release --locked --bin resql --target "$TARGET" \
+    && cp "target/${TARGET}/release/resql" /tmp/resql
 
 # ─────────────────────────────────────────────────────────────
-# Runtime — Google distroless/static. Package set: ca-certificates
-# + tzdata + /etc/passwd. NO libc, NO libssl, NO libgcc — a fully
-# static musl binary needs none of them, and their absence closes
-# every glibc / OpenSSL CVE that would otherwise land in the Trivy
-# report. Target: 0 findings at any severity.
+# Runtime — Google distroless/static. ca-certificates + tzdata +
+# /etc/passwd, nothing else. Trivy scan target: 0 findings, any
+# severity, any status.
 #
 # distroless/static has no shell + no tini; the resql binary runs
-# as PID 1. That's safe because (a) we don't fork child processes
-# (no zombies to reap), and (b) tokio's shutdown_signal() handler
-# already forwards SIGTERM/SIGINT to a graceful axum shutdown.
+# as PID 1. Safe because (a) we don't fork children (no zombies to
+# reap), and (b) tokio's shutdown_signal() forwards SIGTERM/SIGINT
+# to a graceful axum shutdown.
 # ─────────────────────────────────────────────────────────────
 FROM gcr.io/distroless/static-debian12:nonroot
 WORKDIR /app
