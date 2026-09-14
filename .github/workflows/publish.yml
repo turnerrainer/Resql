@@ -196,13 +196,17 @@ jobs:
         run: |
           set -euo pipefail
           TAG='${{ steps.tag.outputs.tag }}'
-          # Pre-release semver (v0.3.0-alpha, v0.3.0-rc.1, etc.) is
-          # marked as a GitHub prerelease so the "Latest release"
-          # badge only advances on stable tags.
-          PRERELEASE_FLAG=""
-          if [[ "$TAG" == *-* ]]; then
-            PRERELEASE_FLAG="--prerelease"
-          fi
+          # Every release is marked `--latest` (green badge on the repo
+          # landing page + `/releases/latest` returns it). We deliberately
+          # do NOT set `--prerelease` even for `-alpha` / `-rc` tags: the
+          # project has never cut a non-alpha, so the prerelease flag
+          # would leave the sidebar widget empty and hide every release
+          # from the landing page. GitHub enforces mutual exclusion —
+          # `--latest` and `--prerelease` cannot both be true.
+          # Once a stable v1.0.0 (or similar non-hyphen tag) ships, this
+          # step should be revisited to re-add prerelease gating so the
+          # stable release keeps the Latest badge instead of a subsequent
+          # alpha stealing it.
           # Idempotent: `gh release view` returns non-zero if the
           # release doesn't exist yet. On re-runs (workflow_dispatch),
           # skip creation and let operators edit the body manually.
@@ -217,5 +221,5 @@ jobs:
           gh release create "$TAG" \
             --title "$TAG" \
             --notes-file "${{ steps.notes.outputs.body-file }}" \
-            $PRERELEASE_FLAG \
+            --latest \
             "${EXTRA[@]}"
