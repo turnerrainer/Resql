@@ -647,7 +647,8 @@ Standard Rust workflow. Before touching code:
 - `.github/workflows/auto-tag.yml` (added by #21) auto-tags + auto-publishes on any future merge that bumps `Cargo.toml` version. Merges that don't bump are idempotent — the workflow short-circuits.
 - Feature branches from that cycle were deleted post-merge (local + remote).
 - h2ck.me v1 verdicts (all ✅) live at [`h2ckme/Resql-on-Rust/v1/PR-REVIEWS/`](https://github.com/h2ckme/Resql-on-Rust/tree/main/v1/PR-REVIEWS). The v2 adversarial re-audit opens ~2 weeks after publish (so ~2026-09-20).
-- `refacto/spec-compliance-v1` is the operator's long-running working branch — do not touch without asking.
+- **Branch layout as of 2026-09-14**: `dev` is the sole remote branch (default + push-protected). All prior feature branches (including `refacto/spec-compliance-v1`) were deleted post-merge / on operator request. No `main` branch exists.
+- **`publish.yml` marks every release `--latest`** (no `--prerelease` flag) so alpha releases appear on the repo landing page. GitHub enforces mutual exclusion between `--latest` and `--prerelease`, and this project has never cut a non-alpha; the flag would just hide every release from the sidebar. Revisit if/when a stable v1.0.0 ships.
 
 ## Where to look next
 
