@@ -43,6 +43,24 @@ pub fn truncate_for_log(s: &str, max: usize) -> String {
     format!("{}…[truncated {} bytes]", &s[..end], s.len() - end)
 }
 
+/// Cap on attacker-controlled strings that flow into a `ResqlError`'s
+/// `Display` (log line, `X-Resql-Error-Message` header). h2ck.me v1 §AP-6
+/// asked for 256 chars on URL-path echoes so a 100 KB path from a
+/// caller doesn't produce a 100 KB WARN or the largest response header
+/// a peer / proxy will accept. The 1 KB message-level cap in
+/// `error.rs` is the defence-in-depth backstop; this cap tightens the
+/// most-attacked field — the user-controlled portion of the message.
+pub const USER_INPUT_MAX_BYTES: usize = 256;
+
+/// Cap a user-controlled string at `USER_INPUT_MAX_BYTES`. Use at the
+/// site where a caller-supplied URL path, parameter name, or header
+/// value is about to be stitched into an error message. The marker
+/// makes truncation visible to log readers without changing the
+/// downstream envelope shape.
+pub fn truncate_user_input(s: &str) -> String {
+    truncate_for_log(s, USER_INPUT_MAX_BYTES)
+}
+
 /// Format an error's `source()` chain as ` -> caused by: <msg>` links,
 /// bounded to 5 hops so a runaway cause chain can't fill a log line.
 pub fn error_chain(err: &(dyn std::error::Error + 'static)) -> String {
@@ -193,6 +211,27 @@ mod tests {
             out.contains("136 bytes"),
             "expected 200-64 bytes noted, out = {out}"
         );
+    }
+
+    #[test]
+    fn truncate_user_input_leaves_short_strings() {
+        assert_eq!(truncate_user_input("/demo/known"), "/demo/known");
+    }
+
+    #[test]
+    fn truncate_user_input_clips_at_256_with_marker() {
+        // AP-6 / T-10: a 4 KB path from a caller must produce an error
+        // message whose user-controlled portion is bounded at 256 bytes.
+        let big = "z".repeat(4096);
+        let out = truncate_user_input(&big);
+        assert!(out.starts_with(&"z".repeat(USER_INPUT_MAX_BYTES)));
+        assert!(
+            out.contains("[truncated"),
+            "expected truncation marker, got {out}"
+        );
+        // 256 bytes of z + marker + digit-count. Well under any header
+        // or log-line ceiling.
+        assert!(out.len() < 320, "post-clip length grew: {}", out.len());
     }
 
     #[test]

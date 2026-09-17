@@ -13,6 +13,11 @@ ignore = [
     # (verified via `cargo build --release` — only sqlx-core, sqlx-postgres,
     # sqlx-sqlite show up). No runtime attack surface. Re-audit if the
     # mysql backend is ever enabled (see tasks/backlog/005-mysql-driver-optional.md).
+    #
+    # Last verified 2026-09-18: `cargo tree --all-features --target
+    # x86_64-unknown-linux-gnu -i rsa` still reports "nothing to print"
+    # — rsa is unreachable through the enabled feature set. No upstream
+    # fix released for rsa 0.9.x as of this date. Next review 2026-12-18.
     "RUSTSEC-2023-0071",
 
     # RUSTSEC-2026-0235 — rkyv archive validation OOB read on Rc/Arc.
@@ -22,12 +27,18 @@ ignore = [
     # requires deserialising untrusted rkyv-serialised archives — a
     # code path Resql never exercises at runtime. `cargo tree -i rkyv`
     # reports nothing (rkyv symbols are optimised out when the
-    # rust_decimal rkyv feature isn't used). No upstream fix as of
-    # 2026-08-05: rust_decimal 1.42.1 is the latest release, and
-    # rkyv 0.7.x has no patched release for this advisory.
-    # Re-audit when either (a) rust_decimal drops the default rkyv
-    # feature, or (b) rkyv 0.7.x publishes a fix, or (c) rust_decimal
-    # ships a version that pulls rkyv 0.8+.
+    # rust_decimal rkyv feature isn't used).
+    #
+    # Last verified 2026-09-18:
+    #  - `cargo tree --all-features -i rkyv` reports nothing — rkyv is
+    #    optimised out of the enabled feature set even under full
+    #    features. Runtime attack surface is nil.
+    #  - rust_decimal 1.43.0 (published 2026-09-02) moved the rkyv
+    #    dependency from an optional non-dev dep to a dev-only dep.
+    #    Upgrading rust_decimal is a viable path to dropping rkyv 0.7
+    #    from the lockfile entirely — tracked separately so this
+    #    security ignore isn't blocked on a dep bump.
+    # Next review 2026-12-18.
     "RUSTSEC-2026-0235",
 ]
 

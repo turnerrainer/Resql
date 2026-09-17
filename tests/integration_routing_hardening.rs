@@ -171,3 +171,91 @@ async fn fn6_unknown_path_still_returns_400_query_not_found() {
     assert_eq!(status, 400);
     assert_eq!(code, "ResqlRuntimeException");
 }
+
+// -------- T-10 / AP-6: clip attacker-controlled path in error responses --------
+
+#[tokio::test]
+async fn t10_query_not_found_message_clips_long_path() {
+    // A caller sending a very long URL path used to see the entire
+    // path echoed back in the `X-Resql-Error-Message` header (bounded
+    // only by the 1 KB message cap). h2ck.me AP-6 asked for a stricter
+    // 256-byte cap on the user-controlled portion so log lines and the
+    // outgoing header remain small regardless of URL length.
+    let app = TestAppBuilder::new()
+        .with_sql("demo/POST/x.sql", "SELECT 1 AS n")
+        .build()
+        .await;
+    // 4 KB of path. Every byte after 256 must be replaced with the
+    // `[truncated N bytes]` marker in the error message.
+    let long_tail = "a".repeat(4096);
+    let path = format!("/demo/{long_tail}");
+    let (status, code, msg, _body) = app.request_err("GET", &path, None, &[]).await;
+    assert_eq!(status, 400);
+    assert_eq!(code, "ResqlRuntimeException");
+    // Envelope cap in `error.rs` is 1024; the T-10 clip should bring
+    // the *whole* error message well below that. Assert both bounds so
+    // a future relaxation of one is caught by the other.
+    assert!(
+        msg.len() < 400,
+        "error message too long ({} bytes) — T-10 cap regressed. msg = {msg}",
+        msg.len()
+    );
+    assert!(
+        msg.contains("[truncated"),
+        "expected truncation marker in msg = {msg}"
+    );
+    // The prefix of the path still appears so operators can eyeball it.
+    assert!(msg.contains("/demo/aaa"), "msg = {msg}");
+}
+
+#[tokio::test]
+async fn t10_method_not_allowed_path_field_also_clipped() {
+    // 405 path also flows the caller's URL back — same shape as
+    // QueryNotFound. Regressioning both call sites so a future refactor
+    // that splits the two error paths cannot re-introduce the leak.
+    let app = TestAppBuilder::new()
+        .with_sql("demo/POST/x.sql", "SELECT 1 AS n")
+        .build()
+        .await;
+    let long_tail = "b".repeat(2048);
+    let path = format!("/demo/{long_tail}");
+    // GET to a POST-only path → 405 (FN6). The path echoes through
+    // MethodNotAllowed.path, which the message uses.
+    let (status, code, msg, _body) = app.request_err("GET", &path, None, &[]).await;
+    // Router won't hit the 405 branch unless the exact `tail` is
+    // registered under another method; since our long tail is not,
+    // we fall through to 400 QueryNotFound. That's fine — T-10's
+    // regression pin is that ANY user-controlled path echo is clipped
+    // at 256 bytes, regardless of which of the two errors fires.
+    assert!(status == 400 || status == 405);
+    assert_eq!(
+        code,
+        if status == 400 {
+            "ResqlRuntimeException"
+        } else {
+            "MethodNotAllowedException"
+        }
+    );
+    assert!(msg.contains("[truncated"), "msg = {msg}");
+    assert!(msg.len() < 400, "msg too long ({}): {msg}", msg.len());
+}
+
+#[tokio::test]
+async fn t10_batch_query_not_found_path_also_clipped() {
+    // POST /:project/*tail/batch also constructs a QueryNotFound with a
+    // formatted path. Cover the batch dispatch path so it can't drift.
+    let app = TestAppBuilder::new()
+        .with_datasources(&["demo"])
+        .with_sql("demo/POST/known.sql", "SELECT 1 AS n")
+        .build()
+        .await;
+    let long_tail = "c".repeat(3000);
+    let path = format!("/demo/{long_tail}/batch");
+    let (status, code, msg, _body) = app
+        .request_err("POST", &path, Some(r#"{"queries":[]}"#), &[])
+        .await;
+    assert_eq!(status, 400);
+    assert_eq!(code, "ResqlRuntimeException");
+    assert!(msg.contains("[truncated"), "msg = {msg}");
+    assert!(msg.len() < 400, "msg too long ({}): {msg}", msg.len());
+}

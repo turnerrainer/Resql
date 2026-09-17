@@ -6,6 +6,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **T-17 (`traceparent` echo on responses).** The observability
+  middleware already adopted an inbound `traceparent` (or generated
+  one) and echoed the trace-id as `X-Trace-Id`. It now also emits the
+  resolved W3C `traceparent` on the response so a next-hop service can
+  chain onto the same trace without translating the Resql-specific
+  header. New regression tests in `tests/integration_observability.rs`
+  cover inbound-adopt-and-echo, generated-value-round-trip, and
+  malformed-inbound-doesn't-crash paths.
+- **T-16 slow-body ingest timeout regression pin.** New
+  `slow_body_hits_request_timeout` test streams a request body that
+  stalls after the first chunk; the `TimeoutLayer` around the handler
+  covers body ingest, so the request must 504 within
+  `request_timeout_seconds` and cannot pin a pool slot indefinitely.
+- **T-21 graceful DB pool close on shutdown.** After
+  `axum::serve(...).with_graceful_shutdown` resolves, `main::run_serve`
+  now calls `DatasourceRegistry::close_all()` which invokes
+  `PgPool::close().await` / `SqlitePool::close().await` on every pool
+  — sqlx's documented graceful-drain path. Without this, dropping the
+  `Arc<DatasourceRegistry>` runs the pool's Drop impl, which does NOT
+  wait for in-flight I/O on Postgres. Regression pin:
+  `db::tests::close_all_marks_pools_closed`.
+
+### Security
+
+- **T-10 (AP-6): clip attacker-controlled URL path in error messages
+  to 256 bytes.** `QueryNotFound` and `MethodNotAllowed` now run the
+  formatted `/{project}/{tail}` through `logging::truncate_user_input`
+  (256-byte cap + `[truncated N bytes]` marker) before it lands in the
+  error's `Display` output. Belt-and-braces with the existing 1 KB
+  message-level cap in `error.rs`. Prevents a 100 KB URL from a
+  caller producing 100 KB of log line + oversized response header
+  echo. Regression pins:
+  `logging::tests::truncate_user_input_clips_at_256_with_marker`,
+  `tests/integration_routing_hardening.rs::t10_*`.
+
+### Housekeeping
+
+- **T-13 `cargo audit` ignore review (2026-09-18).** Both existing
+  ignores (`RUSTSEC-2023-0071` rsa Marvin, `RUSTSEC-2026-0235` rkyv
+  OOB) re-verified against the current lockfile:
+  `cargo tree --all-features -i rsa` and `-i rkyv` both report
+  "nothing to print" — neither crate is reachable via the enabled
+  feature set. Ignore rationales in `.cargo/audit.toml` refreshed
+  with today's verification date, next review 2026-12-18.
+  `rust_decimal 1.43.0` (published 2026-09-02) moves rkyv to
+  dev-dep-only — a viable path to dropping the lockfile entry
+  entirely, tracked separately.
+
 ## [0.4.2-alpha] - 2026-09-13
 
 **Same intent as `0.4.1-alpha` (musl-static + distroless/static runtime

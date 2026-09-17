@@ -21,6 +21,7 @@ use crate::health::{self, StartTime};
 use crate::loader::{HttpMethod, QueryIndex};
 use crate::logging::{
     generate_traceparent, sanitize_log_value, trace_id_from_traceparent, truncate_for_log,
+    truncate_user_input,
 };
 use crate::openapi;
 use crate::query;
@@ -545,6 +546,17 @@ async fn request_observability(cfg: LoggingConfig, mut req: Request, next: Next)
                 .insert(HeaderName::from_static(TRACE_ID_HEADER), hv);
         }
     }
+    // T-17: also emit the resolved W3C `traceparent` on the response so
+    // a next-hop service (or a client tracer that already speaks W3C)
+    // can chain onto the same trace without having to translate the
+    // Resql-specific `X-Trace-Id`. Value is either the inbound one we
+    // adopted verbatim, or one we generated — both are validly-shaped
+    // W3C traceparents.
+    if let Ok(hv) = HeaderValue::try_from(traceparent_value.as_str()) {
+        response
+            .headers_mut()
+            .insert(HeaderName::from_static(TRACEPARENT_HEADER), hv);
+    }
 
     // Skip access log for health probes — they'd drown real traffic.
     let is_health = uri_path == HEALTH_PATH || uri_path == HEALTHZ_PATH;
@@ -787,11 +799,13 @@ async fn dispatch(
                     .collect::<Vec<_>>()
                     .join(", ");
                 return Err(ResqlError::MethodNotAllowed {
-                    path: format!("/{project}/{tail}"),
+                    path: truncate_user_input(&format!("/{project}/{tail}")),
                     allowed: allow_header,
                 });
             }
-            return Err(ResqlError::QueryNotFound(format!("/{project}/{tail}")));
+            return Err(ResqlError::QueryNotFound(truncate_user_input(&format!(
+                "/{project}/{tail}"
+            ))));
         }
     };
     let ds_name = choose_datasource(&state.config, &project_key, &headers)?;
@@ -818,7 +832,9 @@ async fn dispatch_batch(
     let saved = state
         .index
         .get(HttpMethod::Post, &project_key, &tail)
-        .ok_or_else(|| ResqlError::QueryNotFound(format!("/{project}/{tail}")))?;
+        .ok_or_else(|| {
+            ResqlError::QueryNotFound(truncate_user_input(&format!("/{project}/{tail}")))
+        })?;
     let ds_name = choose_datasource(&state.config, &project_key, &headers)?;
     let pool = state
         .registry
