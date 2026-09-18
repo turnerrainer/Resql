@@ -41,6 +41,25 @@ impl DatasourceRegistry {
         Self::connect_all_with_timeout(configs, None).await
     }
 
+    /// Gracefully close every pool. Awaits sqlx's `close().await` on
+    /// each — pools stop accepting new acquires, in-flight queries
+    /// complete, then the underlying connections are closed cleanly.
+    ///
+    /// Called from `main::run_serve` after `axum::serve`'s graceful
+    /// shutdown resolves. Without this, dropping the `Arc` just runs
+    /// each pool's Drop impl, which does NOT wait for in-flight I/O
+    /// on Postgres (sqlx's `PgPool::close` is the documented way to
+    /// signal + await drain).
+    pub async fn close_all(&self) {
+        for (name, pool) in &self.pools {
+            match pool {
+                Pool::Postgres(p) => p.close().await,
+                Pool::Sqlite(p) => p.close().await,
+            }
+            tracing::info!(datasource = %name, "datasource pool closed");
+        }
+    }
+
     /// Same as `connect_all`, but sets `statement_timeout` on every
     /// Postgres connection so long-running queries are killed at the
     /// database side even if the Rust future outlives the HTTP timeout.
@@ -190,5 +209,34 @@ mod tests {
         assert_eq!(reg.names(), vec!["a".to_string()]);
         assert!(reg.get("a").is_some());
         assert!(reg.get("nope").is_none());
+    }
+
+    // T-21: SIGTERM handler audit. Verify that `close_all` marks every
+    // pool as closed so a subsequent acquire fails deterministically —
+    // this is the observable shape of a graceful drain.
+    #[tokio::test]
+    async fn close_all_marks_pools_closed() {
+        let ds = DatasourceConfig {
+            name: "a".into(),
+            url: "sqlite::memory:".into(),
+            username: "".into(),
+            password_env: "".into(),
+            password: None,
+            max_connections: 1,
+            acquire_timeout_seconds: 1,
+        };
+        let reg = DatasourceRegistry::connect_all(&[ds]).await.unwrap();
+        let pool = match reg.get("a").unwrap() {
+            Pool::Sqlite(p) => p.clone(),
+            _ => unreachable!(),
+        };
+        assert!(!pool.is_closed(), "pool should be open initially");
+
+        reg.close_all().await;
+
+        assert!(
+            pool.is_closed(),
+            "pool must be closed after registry.close_all()"
+        );
     }
 }

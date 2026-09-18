@@ -167,7 +167,7 @@ async fn run_serve(config: Option<&PathBuf>) -> Result<()> {
         "app state ready"
     );
 
-    let app = server::router(state);
+    let app = server::router(state.clone());
     let listener = TcpListener::bind(&cfg.server.bind)
         .await
         .with_context(|| format!("binding {}", cfg.server.bind))?;
@@ -178,6 +178,15 @@ async fn run_serve(config: Option<&PathBuf>) -> Result<()> {
         .with_graceful_shutdown(shutdown_signal())
         .await
         .context("axum serve")?;
+
+    // T-21: after axum's graceful drain resolves, close every DB pool
+    // explicitly. `PgPool::close().await` is sqlx's documented way to
+    // signal + await drain — without it, dropping the Arc just runs
+    // the pool's Drop impl, which does NOT wait for in-flight I/O on
+    // Postgres. This is what turns a clean SIGTERM into a clean
+    // exit (no half-committed transactions, no dangling server-side
+    // sessions).
+    state.registry.close_all().await;
     info!("bye");
     Ok(())
 }
