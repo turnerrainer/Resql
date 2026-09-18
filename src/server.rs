@@ -546,6 +546,17 @@ async fn request_observability(cfg: LoggingConfig, mut req: Request, next: Next)
                 .insert(HeaderName::from_static(TRACE_ID_HEADER), hv);
         }
     }
+    // T-17: also emit the resolved W3C `traceparent` on the response so
+    // a next-hop service (or a client tracer that already speaks W3C)
+    // can chain onto the same trace without having to translate the
+    // Resql-specific `X-Trace-Id`. Value is either the inbound one we
+    // adopted verbatim, or one we generated — both are validly-shaped
+    // W3C traceparents.
+    if let Ok(hv) = HeaderValue::try_from(traceparent_value.as_str()) {
+        response
+            .headers_mut()
+            .insert(HeaderName::from_static(TRACEPARENT_HEADER), hv);
+    }
 
     // Skip access log for health probes — they'd drown real traffic.
     let is_health = uri_path == HEALTH_PATH || uri_path == HEALTHZ_PATH;
