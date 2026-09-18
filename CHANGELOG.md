@@ -6,6 +6,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.3-alpha] - 2026-09-18
+
+**h2ck.me v1 NEXT-TASKS follow-up batch + one transitive-security bump.**
+Six one-issue-one-PR-one-CHANGELOG-entry merges landed under this
+release cycle (#56–#61); every item is additive or a strict
+tightening. Caller-visible impact is limited to:
+
+- a new response header `Traceparent: <value>` on every response
+  (T-17 — matches the `X-Trace-Id` echo Resql already emitted, in the
+  W3C-standard shape);
+- error messages for URL paths longer than 256 bytes are truncated
+  with a `[truncated N bytes]` marker (T-10 — HTTP status and
+  `X-Resql-Error-Code` unchanged, so callers that branch on status
+  are unaffected).
+
+### Security
+
+- **RUSTSEC-2026-0285 (rustls TLS 1.3 handshake): bump 0.23.43 →
+  0.23.45.** Medium severity, published 2026-09-14. Pulled
+  transitively via `sqlx-core 0.8.6` and dev-dep `reqwest 0.12.28`;
+  Cargo.lock-only bump. See #56.
+- **T-10 (AP-6): clip attacker-controlled URL path in error messages
+  to 256 bytes.** New helper `logging::truncate_user_input` applied
+  at both `QueryNotFound` construction sites (`server::dispatch`,
+  `server::dispatch_batch`) and the `MethodNotAllowed` site. Defence
+  in depth with the existing 1 KB message-level cap in `error.rs`.
+  Prevents a 100 KB path from producing a 100 KB WARN line or an
+  oversized response header. See #58.
+- **T-13: cargo-audit ignore review (2026-09-18).** Both existing
+  ignores (`RUSTSEC-2023-0071` rsa Marvin, `RUSTSEC-2026-0235` rkyv
+  OOB) re-verified against `cargo tree --all-features -i <crate>`:
+  neither reachable via the enabled feature set. Rationales refreshed
+  with today's date + 2026-12-18 next-review. See #57.
+
+### Added
+
+- **T-17: W3C `traceparent` echoed on responses.** The observability
+  middleware already adopted an inbound `traceparent` (or generated
+  one) and echoed the trace-id as `X-Trace-Id`; it now also emits the
+  resolved `traceparent` on the response so a next-hop service can
+  chain onto the same trace without translating the Resql-specific
+  header. See #60.
+- **T-21: graceful DB-pool close on SIGTERM.** After
+  `axum::serve(...).with_graceful_shutdown` resolves, `main::run_serve`
+  now calls `DatasourceRegistry::close_all().await`, which invokes
+  sqlx's documented graceful-drain path (`PgPool::close().await` /
+  `SqlitePool::close().await`) on every pool. Without this, dropping
+  the `Arc` runs Drop, which does NOT wait for in-flight I/O on
+  Postgres. See #61.
+
+### Test infrastructure
+
+- **T-16: slow-body ingest timeout regression pin.** New
+  `slow_body_hits_request_timeout` streams a body that stalls after
+  the first chunk; the `TimeoutLayer` around the handler covers body
+  ingest, so the request must 504 within `request_timeout_seconds`.
+  Regression pin only — pins already-correct behaviour so a future
+  middleware reorder can't silently regress it. See #59.
+
+### Declined
+
+- **T-22 (`RESQL_OFFLINE=true` mode)** — declined. Adds a test-only
+  code path with no production security benefit; the existing Postgres
+  integration suite already skips cleanly without `TEST_POSTGRES_URL`.
+
 ## [0.4.2-alpha] - 2026-09-13
 
 **Same intent as `0.4.1-alpha` (musl-static + distroless/static runtime
