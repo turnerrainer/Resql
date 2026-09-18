@@ -1526,7 +1526,7 @@ dependencies = [
 
 [[package]]
 name = "resql"
-version = "0.4.2-alpha"
+version = "0.4.3-alpha"
 dependencies = [
  "anyhow",
  "axum",
