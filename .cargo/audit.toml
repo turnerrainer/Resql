@@ -40,6 +40,35 @@ ignore = [
     #    security ignore isn't blocked on a dep bump.
     # Next review 2026-12-18.
     "RUSTSEC-2026-0235",
+
+    # RUSTSEC-2024-0449 — `unsafe-libyaml` unmaintained warning (no CVE).
+    # `unsafe-libyaml 0.2.11` is a transitive of `serde_yaml_ng 0.10.0`,
+    # our YAML parser for `resql.yaml` and the YAML front-matter on
+    # `.sql` files. The original `serde_yaml` is explicitly banned in
+    # `deny.toml` (upstream unmaintained first), and `serde_yaml_ng` is
+    # the chosen fork; it still depends on `unsafe-libyaml` and upstream
+    # has not switched parsers. `serde_yml` is also deprecated.
+    # Alternative Rust YAML crates (noyalib, fyaml) are either very
+    # early (noyalib 0.0.x, pure-Rust but immature) or C-FFI (fyaml →
+    # libfyaml). Switching parsers is a wider migration tracked
+    # separately; this ignore is scoped to the audit gate.
+    #
+    # Runtime exposure: YAML parsing happens only at process start
+    # against operator-controlled inputs (`resql.yaml`, SQL
+    # front-matter under `sql_dir`). No request-path attacker data
+    # ever reaches `unsafe-libyaml`. An operator who supplies a
+    # malicious YAML file at startup can already configure any option
+    # (plaintext `password:`, header-route allowlists, etc.) — the
+    # attack surface does not require a parser bug.
+    #
+    # Last verified 2026-10-14:
+    #  - `cargo tree -i unsafe-libyaml --target all` reports a single
+    #    path: unsafe-libyaml 0.2.11 → serde_yaml_ng 0.10.0 → resql.
+    #  - `cargo search serde_yaml_ng` still shows 0.10.0 as the latest
+    #    release; no upstream migration yet.
+    # Next review 2026-12-18 (bump if serde_yaml_ng ships a parser
+    # swap, or if a RUSTSEC CVE lands against unsafe-libyaml).
+    "RUSTSEC-2024-0449",
 ]
 
 [output]

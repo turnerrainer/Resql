@@ -10,7 +10,16 @@ no-default-features = false
 db-path = "~/.cargo/advisory-db"
 db-urls = ["https://github.com/rustsec/advisory-db"]
 yanked = "deny"
-ignore = []
+# NOTE: full rationale for each ignore lives in `.cargo/audit.toml` so
+# both tools share one source of truth. Keep this list in lockstep.
+ignore = [
+    # RUSTSEC-2024-0449 — `unsafe-libyaml` unmaintained warning (no CVE).
+    # Reaches us via serde_yaml_ng (serde_yaml is explicitly banned
+    # above). Operator-controlled YAML parsed only at process start
+    # — no request-path attacker input. See `.cargo/audit.toml` for
+    # the full write-up and the next-review date.
+    "RUSTSEC-2024-0449",
+]
 
 [licenses]
 version = 2
