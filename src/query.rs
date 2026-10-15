@@ -1667,7 +1667,21 @@ fn mysql_column_value(row: &MySqlRow, idx: usize, ty: &str) -> Value {
     }
     // Integer widths. sqlx picks the native Rust type by MySQL width;
     // bind each in turn and widen for JSON.
-    if ty_upper == "TINYINT" {
+    //
+    // TINYINT needs special handling: MySQL has no native boolean,
+    // but `TINYINT(1)` is the convention — sqlx-mysql reports the
+    // type as `"TINYINT"` and the column metadata flags it as
+    // bool-shaped. sqlx's `Decode<i8>` fails on a bool-shaped column
+    // (the max_length check gates it), returning Err — so a plain
+    // `try_get::<Option<i8>>` yields Null for `TINYINT(1)` columns.
+    // Try bool first (succeeds on `TINYINT(1)`), then i8 (succeeds on
+    // non-1-width `TINYINT`). Either way surface as JSON number so
+    // the caller interprets 0/1 the way the MySQL ecosystem already
+    // does. "BOOLEAN" is a MySQL alias for TINYINT(1); fold it here.
+    if ty_upper == "TINYINT" || ty_upper == "BOOLEAN" {
+        if let Ok(Some(v)) = row.try_get::<Option<bool>, _>(idx) {
+            return Value::Number((v as i64).into());
+        }
         if let Ok(Some(v)) = row.try_get::<Option<i8>, _>(idx) {
             return Value::Number(i64::from(v).into());
         }
@@ -1677,7 +1691,20 @@ fn mysql_column_value(row: &MySqlRow, idx: usize, ty: &str) -> Value {
             return Value::Number(i64::from(v).into());
         }
     }
-    if ty_upper == "SMALLINT" || ty_upper == "YEAR" {
+    if ty_upper == "SMALLINT" {
+        if let Ok(Some(v)) = row.try_get::<Option<i16>, _>(idx) {
+            return Value::Number(i64::from(v).into());
+        }
+    }
+    // YEAR is a 1-byte unsigned type in MySQL representing 1901-2155
+    // (plus special 0000). sqlx-mysql decodes it as `u16`, not `i16`;
+    // trying `i16` first fails on the Decode shape check and the
+    // column surfaces as Null. Try unsigned first; fall back to
+    // signed for driver versions that pick the other mapping.
+    if ty_upper == "YEAR" {
+        if let Ok(Some(v)) = row.try_get::<Option<u16>, _>(idx) {
+            return Value::Number(i64::from(v).into());
+        }
         if let Ok(Some(v)) = row.try_get::<Option<i16>, _>(idx) {
             return Value::Number(i64::from(v).into());
         }

@@ -216,12 +216,20 @@ async fn app_with_mysql(url: &str) -> common::TestApp {
         )
         .with_sql(
             "my/POST/users/create.sql",
-            // MySQL has no RETURNING. Two-statement idiom: INSERT
-            // then SELECT by LAST_INSERT_ID(). Wrapped at the HTTP
-            // level with `-- @transactional` so both land in one tx.
+            // MySQL has no RETURNING, and MySQL prepared statements
+            // can only hold ONE statement — so unlike Postgres, we
+            // can't put `INSERT …; SELECT LAST_INSERT_ID()` in a
+            // single `.sql` file. Operators who want INSERT-then-
+            // return-row on MySQL split into two endpoints or two
+            // HTTP calls. See book/src/mysql-setup.md for the
+            // documented pattern.
+            //
+            // The `-- @transactional` marker is still valid on a
+            // single-statement file — it wraps the INSERT in a
+            // dedicated transaction (useful when combined with
+            // triggers or foreign-key checks that need atomicity).
             "-- @transactional
-             INSERT INTO users (login, email, status) VALUES (:login, :email, :status);
-             SELECT id, login, email, status FROM users WHERE id = LAST_INSERT_ID()",
+             INSERT INTO users (login, email, status) VALUES (:login, :email, :status)",
         )
         .with_sql(
             "my/POST/users/create-returning.sql",
@@ -741,12 +749,20 @@ async fn my_array_param_bound_as_json_works_with_json_contains() {
 // ─── Transactional endpoint rollback ─────────────────────────────────
 
 #[tokio::test]
-async fn my_transactional_endpoint_commits_on_success_and_rolls_back_on_error() {
+async fn my_transactional_endpoint_commits_on_success() {
+    // Single-statement MySQL `-- @transactional` INSERT. MySQL
+    // prepared statements only hold one statement, so unlike
+    // Postgres we can't bundle INSERT + SELECT LAST_INSERT_ID() in
+    // one file. Operators split into two endpoints and verify by
+    // querying the inserted row via the usual SELECT path.
+    //
+    // This test covers the commit path. A rollback test would need
+    // an INSERT that violates a constraint — that's already covered
+    // by `my_insert_batch_rolls_back_on_failure` which uses the
+    // batch endpoint (always transactional) with a UNIQUE collision.
     let url = require_mysql!();
     let app = app_with_mysql(&url).await;
 
-    // Happy path: INSERT + SELECT in one tx; the SELECT shape returns
-    // the newly-created row via LAST_INSERT_ID().
     let login = format!("txok_{}", uniq_suffix());
     let (status, body) = app
         .request(
@@ -757,9 +773,24 @@ async fn my_transactional_endpoint_commits_on_success_and_rolls_back_on_error() 
         )
         .await;
     assert_eq!(status, 200, "body = {body}");
-    let row = &body.as_array().unwrap()[0];
+    // Single-statement INSERT returns no result set.
+    assert!(body.as_array().unwrap().is_empty(), "INSERT must return []");
+
+    // Verify the row landed (and the transaction committed) by
+    // reading it back through the standard SELECT endpoint.
+    let (sel_status, sel_body) = app
+        .request(
+            "GET",
+            &format!("/my/users/find-by-login?login={login}"),
+            None,
+            &[],
+        )
+        .await;
+    assert_eq!(sel_status, 200, "find after tx insert: {sel_body}");
+    let row = &sel_body.as_array().unwrap()[0];
     assert_eq!(row["login"], login);
-    assert!(row["id"].is_number());
+    assert_eq!(row["email"], "e@x");
+    assert_eq!(row["status"], "active");
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────

@@ -98,7 +98,7 @@ change between the two backends in practice.**
 | Array membership | `WHERE id = ANY(:ids)` | `WHERE JSON_CONTAINS(:ids, CAST(id AS JSON))` *(portable)* or `WHERE id MEMBER OF(:ids)` *(MySQL 8.0.17+)* |
 | Expand array into rows | `SELECT * FROM unnest(:ids) AS t(id)` | `SELECT id FROM JSON_TABLE(:ids, '$[*]' COLUMNS (id INT PATH '$')) jt` |
 | Upsert | `INSERT … ON CONFLICT (k) DO UPDATE SET …` | `INSERT … ON DUPLICATE KEY UPDATE …` |
-| Return inserted row | `INSERT … RETURNING *` *(one statement)* | `INSERT …; SELECT * FROM t WHERE id = LAST_INSERT_ID()` *(wrap in `-- @transactional`)* |
+| Return inserted row | `INSERT … RETURNING *` *(one statement)* | Two separate endpoints — see "Multi-statement limitation" below. Alternatively, use the batch endpoint. |
 | Cast | `value::int` | `CAST(value AS SIGNED)` (integers) / `CAST(x AS DECIMAL(10,2))` (etc.) |
 | Case-insensitive LIKE | `col ILIKE 'foo%'` | `LIKE 'foo%'` *(collation-dependent — use a `_ci` collation on the column)* |
 | JSON field access | `data->>'name'` | `data->>'$.name'` *(JSONPath required)* |
@@ -189,14 +189,30 @@ Rules:
 
 ## Transactions on MySQL
 
-Resql's `-- @transactional` marker works identically on MySQL —
-single-shot wrap around multi-statement SQL, commit on success,
-rollback on any error. Batch endpoints are always transactional.
+Resql's `-- @transactional` marker works on MySQL — commit on
+success, rollback on any error. Batch endpoints are always
+transactional. **One important limitation vs. Postgres**: each
+`.sql` file on MySQL must contain exactly **one statement**.
 
-The common MySQL idiom for "insert and return the new row" **requires**
-`-- @transactional` because it's two statements:
+### Multi-statement limitation
+
+MySQL's prepared-statement protocol (`COM_STMT_PREPARE`) can only
+hold a single statement per prepare. sqlx-mysql uses prepared
+statements for every query to get safe parameter binding, so a
+`.sql` file containing `INSERT …; SELECT …;` cannot be executed and
+will surface as a `BadSqlGrammarException` (`400`).
+
+Postgres's extended-query protocol accepts semicolon-separated
+multi-statement SQL in a single `Parse`, which is why the same
+`-- @transactional` recipe works there.
+
+### Insert-and-return-row pattern
+
+Split into two endpoints. The caller does one POST + one GET (or
+projects just the id client-side from the INSERT).
 
 ```sql
+-- sql/users/POST/create.sql
 /*
 params:
   login:  { type: string, required: true }
@@ -205,14 +221,35 @@ params:
 */
 -- @transactional
 INSERT INTO users (login, email, status) VALUES (:login, :email, :status);
-SELECT id, login, email, status FROM users WHERE id = LAST_INSERT_ID();
 ```
 
-Without `-- @transactional`, each statement runs in its own
-auto-committed scope and `LAST_INSERT_ID()` could race across pool
-connections (sqlx holds one connection per request, so in practice
-you're safe, but the marker makes the intent explicit and the atomic
-rollback guarantee is only provided inside a transaction).
+```sql
+-- sql/users/GET/find-by-login.sql
+/*
+params:
+  login: { type: string, required: true }
+*/
+SELECT id, login, email, status FROM users WHERE login = :login;
+```
+
+Alternatively, the batch endpoint (`POST /users/create/batch`) runs
+multiple INSERT statements in one transaction with all-or-nothing
+atomicity — see [Batch endpoint](./sql-files.md#batch-endpoint).
+
+### When `-- @transactional` is useful on single-statement MySQL files
+
+- The statement interacts with triggers that write to other tables
+  and you want atomic rollback on error anywhere in the trigger
+  chain.
+- The statement is a multi-row INSERT and you want "all rows or
+  no rows" semantics (vs. partial INSERT on some constraint
+  failures depending on the storage engine).
+- Composability with middleware that assumes transactional
+  endpoints (future-proofing).
+
+For plain single-row INSERT/UPDATE/DELETE on InnoDB, the marker is
+a no-op — InnoDB wraps each statement in an implicit transaction
+anyway.
 
 ## Timeout caveat — `MAX_EXECUTION_TIME` is a hint
 
@@ -334,9 +371,14 @@ file in this repo, run this checklist **before** emitting SQL:
    normal, then use `JSON_CONTAINS(:xs, CAST(col AS JSON))` /
    `MEMBER OF(:xs)` / `JSON_TABLE(:xs, '$[*]' …)` on the SQL side.
    Never emit `WHERE col = ANY(:xs)` for a MySQL file.
-4. **Multi-statement MySQL files** (e.g. INSERT + SELECT
-   LAST_INSERT_ID()): wrap with `-- @transactional` right after the
-   declaration block.
+4. **No multi-statement MySQL files.** MySQL prepared statements
+   only hold one statement — a `.sql` file with
+   `INSERT …; SELECT …;` on MySQL will fail with
+   `BadSqlGrammarException`. If the task needs insert-and-return-row,
+   split into **two files** (one POST for the INSERT, one GET for
+   the SELECT by login/id). The `-- @transactional` marker is still
+   valid on single-statement MySQL files for trigger-chain
+   atomicity.
 5. **Dates/timestamps**: ISO 8601 strings bind directly. No casts
    needed. If you want to be explicit, `CAST(:ts AS DATETIME)`.
 6. **Verify after writing**: grep the file for `::`, `RETURNING`,

@@ -433,6 +433,16 @@ file for a MySQL datasource.
 | Add a new MySQL column type to the row mapper | Edit `mysql_column_value` in `src/query.rs`. Keep the order deterministic (null detect first, then integer widths signed-then-unsigned, then floats, then DECIMAL, then dates/times, then strings/enum/set, then JSON/BIT/binary, then fallback). Update the type map in [`book/src/mysql-setup.md`](./book/src/mysql-setup.md#row--json-type-map). |
 | Add a MySQL-only integration test | Gate it with `require_mysql!()`. The suite is self-bootstrapping — `bootstrap_schema()` drops + re-creates every table on each test, so it's safe to add new tables there without a Liquibase changelog. |
 
+### Multi-statement limitation (MySQL-only)
+
+MySQL prepared statements can only hold ONE statement. A `.sql`
+file with `INSERT …; SELECT …;` on MySQL returns 400
+`BadSqlGrammarException`. Postgres accepts multi-statement SQL via
+the extended-query protocol; the same `-- @transactional` recipe is
+not portable. INSERT-then-return-row on MySQL = two separate
+endpoints. The `-- @transactional` marker is still valid on a
+single-statement MySQL file (useful for trigger-chain atomicity).
+
 ### Server-side timeout caveat
 
 `SET SESSION MAX_EXECUTION_TIME = <ms>` is **SELECT-only** and
