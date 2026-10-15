@@ -233,17 +233,24 @@ require re-architecture.
 ## DIV-013 — Unknown URL schemes rejected at boot
 
 - **Field / behaviour.** DB URL scheme validation.
-- **Source of truth.** Java accepts any `driverClassName` — MySQL, Oracle,
-  MSSQL, etc. — with a corresponding JDBC driver on the classpath.
-- **Target behaviour.** Rust only accepts URLs starting with `postgres://`,
-  `postgresql://`, or `sqlite:`. Anything else fails at boot with a clear
-  message.
-- **Motivation.** Rust depends on `sqlx` which currently ships PG + SQLite
-  drivers here; MySQL/MariaDB support is on the roadmap (Task 005). Failing
-  loudly at boot beats a runtime `NoSuchDriverException`.
-- **Migration.** Operators using MySQL must wait for Task 005 or use
-  Postgres/SQLite.
-- **Reversibility.** medium (would need `sqlx` MySQL driver + type mapping).
+- **Source of truth.** Java accepts any `driverClassName` — Oracle, MSSQL,
+  etc. — with a corresponding JDBC driver on the classpath.
+- **Target behaviour.** Rust accepts URLs starting with `postgres://`,
+  `postgresql://`, `mysql://`, `mariadb://`, or `sqlite:`. Anything else
+  fails at boot with a clear message that enumerates every supported
+  scheme.
+- **Motivation.** Rust depends on `sqlx` which ships drivers for Postgres,
+  MySQL, and SQLite — any other backend requires a different driver stack
+  (SeaORM-style, custom FFI, etc.) that is out of scope. Failing loudly at
+  boot beats a runtime `NoSuchDriverException`.
+- **Migration.** Operators using Postgres, MySQL, MariaDB, or SQLite are
+  covered. Oracle / MSSQL / etc. are not supported.
+- **Reversibility.** medium (would need an additional `sqlx` driver +
+  type-mapper for the new backend).
+
+See [DIV-023](#div-023--mysql--mariadb-backend-array-params-bind-as-json)
+for the per-backend dialect contract when writing `.sql` files
+against the MySQL / MariaDB wire protocol.
 
 ## DIV-014 — Boot log line strings
 

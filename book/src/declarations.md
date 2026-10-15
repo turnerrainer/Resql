@@ -68,8 +68,8 @@ convention and matches Ruuter's declaration format.
 | `integer`  | integer, string that parses as i64               | BIGINT                                         |
 | `number`   | number, string that parses as f64                | DOUBLE PRECISION                               |
 | `boolean`  | bool, `"true"`/`"false"`/`"1"`/`"0"`             | BOOLEAN                                        |
-| `array`    | array, JSON-encoded array string                 | native array by declared `items.type`, or JSONB|
-| `object`   | object, JSON-encoded object string               | JSONB (Postgres) / TEXT (SQLite)               |
+| `array`    | array, JSON-encoded array string                 | **Postgres**: native array by declared `items.type` (int8[], text[], uuid[], …) or JSONB. **MySQL / MariaDB**: JSON string — use `JSON_CONTAINS` / `MEMBER OF` / `JSON_TABLE` on the SQL side ([details](./mysql-setup.md#arrays--the-array-as-json-contract)). **SQLite**: JSON string — use `json_each`. |
+| `object`   | object, JSON-encoded object string               | JSONB (Postgres) / JSON (MySQL) / TEXT (SQLite) |
 | `date`     | strict `YYYY-MM-DD`                              | text (Postgres implicit-casts on assignment)   |
 | `datetime` | RFC 3339 (any offset → UTC) or naive ISO 8601    | text (Postgres implicit-casts on assignment)   |
 | `uuid`     | any form `uuid::Uuid::parse_str` accepts         | text (Postgres implicit-casts on assignment)   |
@@ -127,6 +127,14 @@ Per-param attributes:
   (Postgres arrays are physically flat — no native "array of array"
   type). Legacy declarations with no `items:` block keep the old
   runtime-heuristic behaviour.
+
+  **MySQL / MariaDB**: the declaration is unchanged — same `type:
+  array` + `items:` syntax and the same request-boundary element
+  validation — but the wire bind is a **JSON string** (MySQL has no
+  native array type). Consume via `JSON_CONTAINS(:xs, CAST(col AS
+  JSON))`, `col MEMBER OF(:xs)` (8.0.17+), or `JSON_TABLE(:xs,
+  '$[*]' COLUMNS …)`. See [MySQL / MariaDB backend →
+  Arrays](./mysql-setup.md#arrays--the-array-as-json-contract).
 - `enum: [<values...>]` — closed set of permitted values (JSON Schema
   `enum` keyword). Rejected at the request boundary before any SQL
   binding, so the database never sees a value outside the set. Every

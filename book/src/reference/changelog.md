@@ -6,6 +6,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0-alpha] - 2026-10-15
+
+**First-class MySQL / MariaDB backend.** Minor-version bump —
+additive feature, backward-compatible for existing Postgres /
+SQLite deployments. Zero `.sql` files on existing datasources
+need to change. See [MySQL / MariaDB
+backend](https://github.com/turnerrainer/Resql/blob/main/book/src/mysql-setup.md)
+in the book for the full dialect contract and the LLM authoring
+checklist.
+
 ### Added
 
 - **MySQL / MariaDB support (first-class backend).** `mysql://` and
@@ -674,7 +684,8 @@ Spring Boot service. Interface-compatible with the original for the SQL-file-to-
 - Container image signed with cosign keyless via GHA OIDC.
 - Trivy HIGH/CRITICAL scan gates image signing.
 
-[Unreleased]: https://github.com/turnerrainer/Resql/compare/v0.4.3-alpha...HEAD
+[Unreleased]: https://github.com/turnerrainer/Resql/compare/v0.5.0-alpha...HEAD
+[0.5.0-alpha]: https://github.com/turnerrainer/Resql/releases/tag/v0.5.0-alpha
 [0.4.3-alpha]: https://github.com/turnerrainer/Resql/releases/tag/v0.4.3-alpha
 [0.4.2-alpha]: https://github.com/turnerrainer/Resql/releases/tag/v0.4.2-alpha
 [0.4.1-alpha]: https://github.com/turnerrainer/Resql/releases/tag/v0.4.1-alpha

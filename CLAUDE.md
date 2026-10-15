@@ -25,8 +25,8 @@ Entry points worth knowing:
 
 ## Current version
 
-- **Latest published**: `0.3.0-alpha` — live on `docker.io/turnerrainer/resql:0.3.0-alpha` + `ghcr.io/turnerrainer/resql:0.3.0-alpha`, cosign-signed, published 2026-09-10. GitHub Release: <https://github.com/turnerrainer/Resql/releases/tag/v0.3.0-alpha>.
-- **In `Cargo.toml` on `dev`**: `0.4.3-alpha`. `v0.4.0-alpha` failed publish at the Trivy HIGH gate (libpcre2 CVEs from `debian:bookworm-slim`). `v0.4.1-alpha` was the fix — musl-static + distroless/static via per-arch `FROM builder-${TARGETARCH}` — but ALSO failed publish: BuildKit refuses to interpolate `TARGETARCH` in a stage NAME at graph-solve time. `0.4.2-alpha` rewrote the multi-arch build around `cargo-zigbuild` (single builder, TARGETARCH dispatch inside a RUN step) — verified locally to produce a 0-CVE image. `0.4.3-alpha` lands the h2ck.me v1 NEXT-TASKS follow-up batch: T-10 (attacker-path clip in error messages), T-13 (audit-ignore review refresh), T-16 (slow-body ingest timeout regression pin), T-17 (`traceparent` echoed on response), T-21 (graceful DB-pool close on SIGTERM) — each merged as its own PR (#56 rustls RUSTSEC-2026-0285, #57 T-13, #58 T-10, #59 T-16, #60 T-17, #61 T-21). Post-release: two container tags need manual cleanup — `:0.4.0-alpha` (unsigned, vulnerable) exists on both registries; `:0.4.1-alpha` was NEVER pushed to any registry (build failed before push), so no cleanup needed there.
+- **Latest in `Cargo.toml` on `dev`**: `0.5.0-alpha` — adds first-class MySQL / MariaDB backend (`mysql://` / `mariadb://` schemes, `Pool::MySql` + `Dialect::MySql`). Additive feature, backward-compatible for existing Postgres / SQLite deployments. Shipped by PR #66; release PR follows. See [`book/src/mysql-setup.md`](./book/src/mysql-setup.md) for the dialect contract + LLM authoring checklist.
+- **Prior published tags** (latest first): `0.3.0-alpha` (publish success, 2026-09-10) is the last stable tag on both registries. `0.4.0-alpha` was pushed unsigned/vulnerable before the publish gate caught Trivy HIGH on libpcre2 — needs manual cleanup. `0.4.1-alpha` never shipped (BuildKit `TARGETARCH` interpolation bug — fixed in `0.4.2-alpha` via cargo-zigbuild). `0.4.2-alpha` / `0.4.3-alpha` landed on `dev` but neither triggered a published container; the auto-tag workflow short-circuits on CI-blocked releases.
 - **Runtime base**: `gcr.io/distroless/static-debian12:nonroot` — no libc, no shell, no apt, no curl, no dynamic linker. Resql binary is a fully-static musl executable running as PID 1 (tokio's `shutdown_signal()` handles SIGTERM cleanly — no tini needed since we don't fork children). Runtime user is `nonroot` (UID 65532), not `resql` (UID 1000) — bind-mounts must be readable by UID 65532. Debug via sidecar or a one-off `gcr.io/distroless/base-debian12:debug-nonroot` container against the same config volume.
 - **Multi-arch Dockerfile rule**: do NOT interpolate `TARGETARCH` / `TARGETPLATFORM` into a `FROM stage-${VAR}` stage NAME. BuildKit resolves the stage graph before per-stage ARG population; the interpolation returns empty. Use one builder stage and dispatch on `TARGETARCH` inside a RUN step (where the ARG IS populated by BuildKit) — see the current Dockerfile for the pattern.
 
@@ -414,7 +414,7 @@ else:
 PY
 ```
 
-## MySQL / MariaDB backend (post-0.4.3-alpha, [Unreleased])
+## MySQL / MariaDB backend (0.5.0-alpha)
 
 **Full LLM-oriented reference**:
 [`book/src/mysql-setup.md`](./book/src/mysql-setup.md) — Postgres →

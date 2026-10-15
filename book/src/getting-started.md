@@ -74,7 +74,9 @@ curl "http://localhost:8080/users/hello?name=world" \
 The demo image bakes `sql/users/*` and `sql/audit/*` in. For your own
 endpoints you'll want to mount a directory over `/app/sql`.
 
-Create a file `./mysql/users/GET/find-by-login.sql`:
+Create a file `./sql/users/GET/find-by-login.sql`
+(the first path segment `users` is the **URL project**, not a
+backend hint — the host directory can have any name you mount):
 
 ```sql
 /*
@@ -105,7 +107,7 @@ Run with your directory mounted and a Postgres datasource wired up:
 
 ```bash
 docker run --rm -p 8080:8080 \
-  -v "$PWD/mysql:/app/sql:ro" \
+  -v "$PWD/sql:/app/sql:ro" \
   -v "$PWD/resql.yaml:/app/resql.yaml:ro" \
   -e USERS_DB_PASSWORD="secret" \
   turnerrainer/resql:0.1.1-alpha
