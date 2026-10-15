@@ -313,10 +313,8 @@ Every request except `/health` / `/healthz` must now carry
 
 ## MySQL / MariaDB backend
 
-MySQL and MariaDB are first-class alongside Postgres. Use `mysql://` or
-`mariadb://` as the datasource URL scheme — both land in the same
-driver (the MySQL wire protocol) and are indistinguishable at
-runtime beyond the `/datasources` label.
+MySQL and MariaDB are first-class alongside Postgres. Use `mysql://`
+or `mariadb://` as the datasource URL scheme.
 
 ```yaml
 datasources:
@@ -326,76 +324,9 @@ datasources:
     password_env: "RESQL_ANALYTICS_PASSWORD"
 ```
 
-### Writing MySQL-dialect SQL
-
-Each `.sql` file is authored in **its target backend's dialect**.
-Resql does not translate between dialects. A file served by a MySQL
-datasource is MySQL SQL; a file served by a Postgres datasource is
-Postgres SQL. The same Resql instance can serve both; the project →
-datasource routing picks the backend per request.
-
-Common MySQL-specific idioms you'll write directly:
-
-| Need | MySQL dialect |
-|---|---|
-| Upsert | `INSERT … ON DUPLICATE KEY UPDATE …` |
-| Return inserted row | `INSERT …; SELECT … WHERE id = LAST_INSERT_ID()` (wrap with `-- @transactional` for atomicity) |
-| JSON field access | `data->>'$.name'` (JSONPath required) |
-| Cast | `CAST(value AS SIGNED)` (no `::` operator) |
-
-### Array parameters
-
-MySQL has no native array type. A declaration can still use `type:
-array` with an `items:` block — element-level type validation runs
-the same as on Postgres — but the bind sends **JSON**. The SQL side
-uses JSON predicates:
-
-```yaml
-params:
-  ids: { type: array, items: { type: integer }, required: true }
-```
-
-```sql
--- MySQL 8.0.17+
-SELECT id, login FROM users WHERE id MEMBER OF(:ids);
-
--- Portable to earlier 8.x
-SELECT id, login FROM users WHERE JSON_CONTAINS(:ids, CAST(id AS JSON));
-
--- With explicit expansion
-SELECT u.id, u.login FROM users u
-JOIN JSON_TABLE(:ids, '$[*]' COLUMNS (id INT PATH '$')) jt ON jt.id = u.id;
-```
-
-See `DIVERGENCES.md` DIV-023 for the full contract.
-
-### Row → JSON type mapping
-
-| MySQL type | JSON output |
-|---|---|
-| `TINYINT` / `SMALLINT` / `MEDIUMINT` / `INT` / `BIGINT` (± signed) | number (widened to i64) |
-| `BIGINT UNSIGNED` | number (u64; may exceed `i64::MAX`) |
-| `FLOAT` / `DOUBLE` | number |
-| `DECIMAL` / `NUMERIC` | string (precision preserved; same policy as Postgres NUMERIC) |
-| `DATE` | `YYYY-MM-DD` |
-| `DATETIME` / `TIMESTAMP` | `YYYY-MM-DDTHH:MM:SS[.ffffff]` (ISO 8601 with `T`) |
-| `TIME` | `HH:MM:SS` |
-| `YEAR` | number |
-| `CHAR` / `VARCHAR` / `TEXT*` | string |
-| `ENUM` | string (the member label) |
-| `SET` | string (comma-separated member list — MySQL's wire shape) |
-| `JSON` | unwrapped JSON value (array / object / scalar) |
-| `BIT(1)` | boolean |
-| `BIT(N > 1)` | hex string |
-| `BINARY` / `VARBINARY` / `BLOB*` | string if valid UTF-8, else null |
-
-### Query timeout caveat
-
-`request_timeout_seconds > 0` applies `SET SESSION MAX_EXECUTION_TIME
-= <ms>` on every MySQL connection, mirroring the Postgres
-`statement_timeout` posture. **Important semantic difference**:
-MySQL's `MAX_EXECUTION_TIME` is SELECT-only and hint-shaped — the
-optimizer may still finish past the budget on specific plans, and
-non-SELECT statements ignore it entirely. The middleware
-`TimeoutLayer` remains the authoritative wall-clock cap; MySQL's
-server-side hint is defence in depth.
+**The authoritative reference lives on its own page**:
+[MySQL / MariaDB backend](./mysql-setup.md) — includes the Postgres →
+MySQL dialect cheat sheet, the array-as-JSON contract, the full row →
+JSON type map, the `MAX_EXECUTION_TIME` timeout caveat, local
+development recipe, and an LLM authoring checklist. Read that page
+before writing any `.sql` file for a MySQL datasource.

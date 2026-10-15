@@ -9,6 +9,21 @@ batch API.
 > validation semantics that the fence unlocks (optional params, typed
 > requests, generated OpenAPI spec).
 
+## Which SQL dialect to write
+
+Resql does **not** translate between SQL dialects. The dialect in each
+`.sql` file is determined by the URL scheme of its resolved datasource:
+
+| Datasource URL scheme | Dialect |
+|---|---|
+| `postgres://` / `postgresql://` | Postgres (default assumption in this repo) |
+| `mysql://` / `mariadb://` | MySQL — see [MySQL / MariaDB backend](./mysql-setup.md) for the full dialect contract + cheat sheet |
+| `sqlite:` | SQLite (usually only test fixtures) |
+
+Avoid Postgres-isms (`::` casts, `RETURNING`, `ANY(:xs)`, `ILIKE`,
+JSONB operators, `||` for concat) in MySQL files — they are syntax
+errors. The MySQL page has the full Postgres → MySQL idiom table.
+
 ## Directory layout → URL
 
 The scanner expects three levels:
@@ -49,7 +64,10 @@ Rules:
 ## Named parameters
 
 Use `:name` in your SQL. Any JSON body key with a matching name binds
-to it. Repeated `:name` binds the same value at every position.
+to it. Repeated `:name` binds the same value at every position
+(semantically — on Postgres and SQLite the second occurrence reuses a
+single indexed slot; on MySQL it emits a second anonymous `?` and
+binds the value twice. Identical observable behaviour.)
 
 ```sql
 -- sql/crm/POST/users/find.sql
@@ -108,12 +126,16 @@ Behaviour depends on the file's declaration
 JSON values bind at their natural type:
 
 - `null` → SQL NULL
-- `true` / `false` → BOOLEAN
+- `true` / `false` → BOOLEAN (Postgres); `TINYINT(1)` on MySQL *(no
+  native boolean type — the i8 `0` / `1` wire form)*
 - integer → 64-bit integer
 - floating-point → 64-bit double
 - string → text
-- arrays / objects (Postgres only) → JSONB (bind with `::jsonb` cast if
-  you want the DB to enforce it)
+- arrays / objects on Postgres → JSONB (bind with `::jsonb` cast if
+  you want the DB to enforce it); on MySQL / SQLite → JSON **string**
+  (consume with `JSON_CONTAINS` / `JSON_TABLE` on MySQL,
+  `json_each` on SQLite — see the [Array parameters](#array-parameters)
+  section below)
 
 For dates and timestamps, cast in SQL and declare the param as `datetime`:
 
@@ -192,7 +214,22 @@ Soft ceiling: batching 10⁴ rows in one request works fine, but the
 transaction holds row locks until commit. Consumers doing 10⁵+ row
 loads should split into multiple batches at the caller.
 
-## Native array parameters (Postgres)
+## Array parameters
+
+Binding behaviour differs by backend. The declaration is the same
+everywhere (`type: array` + `items:` block); the SQL side changes.
+
+| Backend | Wire-side binding | SQL-side consumption |
+|---|---|---|
+| Postgres | Native array (`text[]`, `int8[]`, `uuid[]`, …) when `items.type` is declared | `unnest(:xs)`, `col = ANY(:xs)` |
+| MySQL / MariaDB | **JSON string** (no native array type) | `JSON_CONTAINS(:xs, CAST(col AS JSON))`, `col MEMBER OF(:xs)` *(8.0.17+)*, `JSON_TABLE(:xs, '$[*]' …)` — see [MySQL / MariaDB backend](./mysql-setup.md#arrays--the-array-as-json-contract) |
+| SQLite | JSON string | `json_each(:xs)` |
+
+Element-level type validation runs identically on every backend —
+wrong-typed elements are rejected at the request boundary before any
+SQL runs.
+
+### Postgres — native arrays
 
 Declaring `items.type` on an array parameter binds the array as its
 matching native Postgres type — `text[]`, `int8[]`, `float8[]`,
@@ -258,6 +295,11 @@ Rules:
   ```sql
   SELECT value AS actor FROM json_each(:actors);
   ```
+- **MySQL / MariaDB** also has no native array type. Same JSON-string
+  binding as SQLite, but with MySQL's richer JSON predicate set
+  (`JSON_CONTAINS`, `MEMBER OF`, `JSON_TABLE`). Full examples on the
+  [MySQL / MariaDB backend](./mysql-setup.md#arrays--the-array-as-json-contract)
+  page.
 
 ## Per-file `@transactional` marker
 

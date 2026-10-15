@@ -4,6 +4,12 @@ SQL-files-as-REST-endpoints microservice. Drop a `.sql` file, get an HTTP
 endpoint. Rust rewrite of the [Bürokratt Resql](https://github.com/buerokratt/Resql)
 Spring Boot service.
 
+**Supported backends:** PostgreSQL, MySQL / MariaDB, SQLite. The URL
+scheme in each datasource picks the backend. Each `.sql` file is
+authored in its target backend's dialect; there is no cross-dialect
+translation layer. See [MySQL / MariaDB
+backend](./book/src/mysql-setup.md) when adding a MySQL datasource.
+
 **Latest published:** 0.4.0-alpha (`docker.io/turnerrainer/resql:0.4.0-alpha`, also `ghcr.io/turnerrainer/resql:0.4.0-alpha`, cosign-signed) — closes the h2ck.me v1 runtime break-test + log-attack pass, adopts every applicable fleet stronghold. **Breaking defaults + new boot-refuse check** — see [Upgrading to 0.4.0-alpha](#upgrading-to-040-alpha) before you re-deploy.
 **License:** [Apache-2.0](./LICENSE)
 

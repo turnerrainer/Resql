@@ -416,40 +416,41 @@ PY
 
 ## MySQL / MariaDB backend (post-0.4.3-alpha, [Unreleased])
 
-- Accepted URL schemes: `mysql://`, `mariadb://` — both land in
-  `Pool::MySql`. `connect()`'s "unsupported scheme" error now
-  enumerates all five valid prefixes (postgres://, postgresql://,
-  mysql://, mariadb://, sqlite:); grep an operator-visible string if
-  you have alerts on the old message.
-- Rewriter: `Dialect::MySql` emits positional `?` (no index). A
-  repeated `:name` binds the value at every occurrence (unlike
-  Postgres `$N` / SQLite `?N`, which reuse one slot). Live in
-  `rewrite_named_params` + see tests `rewrite_mysql_*`.
-- No native array type. The validation layer still enforces `type:
-  array` / `items:` as usual, but the bind side sends JSON — authors
-  use `JSON_CONTAINS(:ids, CAST(id AS JSON))` /
-  `JSON_TABLE(:ids, '$[*]' …)` / `id MEMBER OF(:ids)` on the SQL side.
-  **No per-DSL translation layer exists**; a `.sql` file is written in
-  the backend's native dialect. See `DIVERGENCES.md` DIV-023 for the
-  full rationale.
-- Server-side timeout: `request_timeout_seconds > 0` sets `SET SESSION
-  MAX_EXECUTION_TIME = <ms>` in `after_connect`. Hint-shaped, SELECT-only;
-  the middleware `TimeoutLayer` is still the authoritative wall-clock cap.
-- Row mapper (`mysql_column_value`) covers every common MySQL type.
-  Integer widths match sqlx's native decode (`TINYINT`→i8, …,
-  `BIGINT UNSIGNED`→u64, serialised as JSON number via
-  `serde_json::Number::from(u64)`); `DECIMAL`→string; dates/times →
-  ISO 8601 strings (same shape as the Postgres path); `JSON` →
-  unwrapped JSON value; `BIT(1)` → bool; binary families → UTF-8
-  string if valid else null.
-- `/datasources` reports driver class `com.mysql.cj.jdbc.Driver` for
-  both schemes.
-- Integration tests gated by `TEST_MYSQL_URL`. CI runs a `mysql:8.0`
-  service container (see `.github/workflows/tests.yml`); set the env
-  var locally to a reachable MySQL to exercise the suite.
-- No breaking change for Postgres / SQLite users. BREAKING only for
-  configs or alerts that grepped the old reject-message string (now
-  mentions mysql:// and mariadb://).
+**Full LLM-oriented reference**:
+[`book/src/mysql-setup.md`](./book/src/mysql-setup.md) — Postgres →
+MySQL cheat sheet, array-as-JSON contract, type map, local dev
+recipe, LLM authoring checklist. Read it before authoring a `.sql`
+file for a MySQL datasource.
+
+### Code-side rules (decision table)
+
+| When you… | …do this |
+|---|---|
+| Add a new URL scheme or touch `connect()` | Keep the error message enumerating all five prefixes: `postgres://`, `postgresql://`, `mysql://`, `mariadb://`, `sqlite:` |
+| Add a `match` on `Pool` or `Dialect` | Three arms are mandatory: `Postgres`, `Sqlite`, `MySql`. The compiler enforces exhaustiveness. |
+| Add a new `Dialect` behaviour | Follow the two-group split: `Postgres | Sqlite` share indexed placeholders (`$N` / `?N`); `MySql` emits anonymous `?` and pushes `name` once per occurrence. See `rewrite_named_params` and tests `rewrite_mysql_*`. |
+| Add a MySQL binding path | Mirror `bind_pg`'s discipline — the **declared** `ParamType` drives the wire type, not the JSON shape. `type: array` → JSON string; semantic scalar types (`uuid`, `date`, `datetime`) → string. |
+| Add a new MySQL column type to the row mapper | Edit `mysql_column_value` in `src/query.rs`. Keep the order deterministic (null detect first, then integer widths signed-then-unsigned, then floats, then DECIMAL, then dates/times, then strings/enum/set, then JSON/BIT/binary, then fallback). Update the type map in [`book/src/mysql-setup.md`](./book/src/mysql-setup.md#row--json-type-map). |
+| Add a MySQL-only integration test | Gate it with `require_mysql!()`. The suite is self-bootstrapping — `bootstrap_schema()` drops + re-creates every table on each test, so it's safe to add new tables there without a Liquibase changelog. |
+
+### Server-side timeout caveat
+
+`SET SESSION MAX_EXECUTION_TIME = <ms>` is **SELECT-only** and
+**hint-shaped** on MySQL. The HTTP-level `TimeoutLayer` is still the
+authoritative wall-clock cap; the server-side knob is defence in
+depth. Do not treat it as a hard kill like Postgres
+`statement_timeout`.
+
+### Compat posture
+
+- `/datasources` reports `com.mysql.cj.jdbc.Driver` for both
+  `mysql://` and `mariadb://` schemes (MySQL Connector/J speaks
+  MariaDB; the field is a display label).
+- CI uses a `mysql:8.0` service container with `TEST_MYSQL_URL`
+  exported. Local devs run the suite by pointing the env var at any
+  reachable MySQL.
+- **BREAKING** only for configs/alerts that grepped the old
+  unsupported-scheme reject message. HTTP wire shape unchanged.
 
 ## Fastest way to audit a live config
 

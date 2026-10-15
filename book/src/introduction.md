@@ -7,6 +7,12 @@ at `<METHOD> /<project>/<name>` on next startup. JSON payload keys bind
 to `:named` SQL parameters. Result columns are re-cased snake → camel and
 returned as a JSON array.
 
+**Supported backends:** PostgreSQL, MySQL / MariaDB, SQLite. The URL
+scheme in each `datasources:` entry picks the backend. Each `.sql`
+file is authored in its target backend's dialect — see the per-backend
+pages ([Postgres](./postgres-setup.md),
+[MySQL / MariaDB](./mysql-setup.md)) for the dialect contract.
+
 **Version:** 0.1.1-alpha
 **License:** [Apache-2.0](https://www.apache.org/licenses/LICENSE-2.0)
 **Container:** `docker.io/turnerrainer/resql:0.1.1-alpha`
