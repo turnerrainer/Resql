@@ -13,7 +13,7 @@ SQL-files-as-REST-endpoints microservice. A directory tree of `.sql`
 files under `sql/<project>/<GET|POST>/<name>.sql` becomes an HTTP API
 at `<METHOD> /<project>/<name>`. Interface-compatible Rust rewrite of
 the [Bürokratt Resql](https://github.com/buerokratt/Resql) Spring Boot
-service. Axum 0.7 + Tokio + sqlx (Postgres/SQLite).
+service. Axum 0.7 + Tokio + sqlx (Postgres / SQLite / MySQL + MariaDB).
 
 Entry points worth knowing:
 - `src/server.rs` — router + middleware chain, request handlers.
@@ -414,6 +414,43 @@ else:
 PY
 ```
 
+## MySQL / MariaDB backend (post-0.4.3-alpha, [Unreleased])
+
+- Accepted URL schemes: `mysql://`, `mariadb://` — both land in
+  `Pool::MySql`. `connect()`'s "unsupported scheme" error now
+  enumerates all five valid prefixes (postgres://, postgresql://,
+  mysql://, mariadb://, sqlite:); grep an operator-visible string if
+  you have alerts on the old message.
+- Rewriter: `Dialect::MySql` emits positional `?` (no index). A
+  repeated `:name` binds the value at every occurrence (unlike
+  Postgres `$N` / SQLite `?N`, which reuse one slot). Live in
+  `rewrite_named_params` + see tests `rewrite_mysql_*`.
+- No native array type. The validation layer still enforces `type:
+  array` / `items:` as usual, but the bind side sends JSON — authors
+  use `JSON_CONTAINS(:ids, CAST(id AS JSON))` /
+  `JSON_TABLE(:ids, '$[*]' …)` / `id MEMBER OF(:ids)` on the SQL side.
+  **No per-DSL translation layer exists**; a `.sql` file is written in
+  the backend's native dialect. See `DIVERGENCES.md` DIV-023 for the
+  full rationale.
+- Server-side timeout: `request_timeout_seconds > 0` sets `SET SESSION
+  MAX_EXECUTION_TIME = <ms>` in `after_connect`. Hint-shaped, SELECT-only;
+  the middleware `TimeoutLayer` is still the authoritative wall-clock cap.
+- Row mapper (`mysql_column_value`) covers every common MySQL type.
+  Integer widths match sqlx's native decode (`TINYINT`→i8, …,
+  `BIGINT UNSIGNED`→u64, serialised as JSON number via
+  `serde_json::Number::from(u64)`); `DECIMAL`→string; dates/times →
+  ISO 8601 strings (same shape as the Postgres path); `JSON` →
+  unwrapped JSON value; `BIT(1)` → bool; binary families → UTF-8
+  string if valid else null.
+- `/datasources` reports driver class `com.mysql.cj.jdbc.Driver` for
+  both schemes.
+- Integration tests gated by `TEST_MYSQL_URL`. CI runs a `mysql:8.0`
+  service container (see `.github/workflows/tests.yml`); set the env
+  var locally to a reachable MySQL to exercise the suite.
+- No breaking change for Postgres / SQLite users. BREAKING only for
+  configs or alerts that grepped the old reject-message string (now
+  mentions mysql:// and mariadb://).
+
 ## Fastest way to audit a live config
 
 ```bash
@@ -509,6 +546,19 @@ datasources:
     url:          "postgres://audit-db.internal:5432/audit"
     username:     "resql_audit"
     password_env: "RESQL_AUDIT_PASSWORD"
+
+  # MySQL / MariaDB datasources are first-class alongside Postgres.
+  # Use `mysql://` or `mariadb://` as the URL scheme. The `.sql` files
+  # for this project are authored in MySQL dialect — no per-DSL
+  # translation layer exists (see DIVERGENCES.md DIV-023).
+  #
+  # Array params bind as JSON strings on MySQL; author SQL uses
+  # `JSON_CONTAINS(:ids, CAST(id AS JSON))` or
+  # `id MEMBER OF(:ids)` (MySQL 8.0.17+) instead of `= ANY(:ids)`.
+  # - name: analytics
+  #   url:          "mysql://analytics-db.internal:3306/analytics"
+  #   username:     "resql_analytics"
+  #   password_env: "RESQL_ANALYTICS_PASSWORD"
 
 # ─── CORS ────────────────────────────────────────────────────────────────────
 # Default is empty → no CORS layer at all → browsers refuse cross-origin
@@ -656,7 +706,7 @@ Standard Rust workflow. Before touching code:
 |---|---|
 | Full breaking-change bullets + release notes | `CHANGELOG.md` |
 | Domain design (what Resql is/isn't) | `docs/DESIGN.md` |
-| Divergence-from-Java catalog (DIV-001..DIV-022) | `DIVERGENCES.md` |
+| Divergence-from-Java catalog (DIV-001..DIV-023) | `DIVERGENCES.md` |
 | Project rules (test hygiene, commit style, etc.) | `STANDARDS.md` |
 | Cross-project ruleset | `../DEV-REQUIREMENTS.md` |
 | h2ck.me audit trail (PR reviews, break-the-fix probes) | https://github.com/h2ckme/Resql-on-Rust |

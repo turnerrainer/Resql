@@ -2,9 +2,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use sqlx::mysql::{MySqlConnectOptions, MySqlPoolOptions};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
-use sqlx::{Executor, PgPool, SqlitePool};
+use sqlx::{Executor, MySqlPool, PgPool, SqlitePool};
 
 use crate::config::DatasourceConfig;
 use crate::error::ResqlError;
@@ -14,6 +15,7 @@ use crate::error::ResqlError;
 pub enum Pool {
     Postgres(PgPool),
     Sqlite(SqlitePool),
+    MySql(MySqlPool),
 }
 
 /// Registry of datasource-name → Pool.
@@ -55,15 +57,19 @@ impl DatasourceRegistry {
             match pool {
                 Pool::Postgres(p) => p.close().await,
                 Pool::Sqlite(p) => p.close().await,
+                Pool::MySql(p) => p.close().await,
             }
             tracing::info!(datasource = %name, "datasource pool closed");
         }
     }
 
-    /// Same as `connect_all`, but sets `statement_timeout` on every
-    /// Postgres connection so long-running queries are killed at the
-    /// database side even if the Rust future outlives the HTTP timeout.
-    /// The value is applied only to Postgres pools; SQLite has no
+    /// Same as `connect_all`, but sets a server-side query timeout on
+    /// every Postgres / MySQL connection so long-running queries are
+    /// killed at the database side even if the Rust future outlives
+    /// the HTTP timeout. Postgres: `SET statement_timeout = <ms>`
+    /// (hard kill). MySQL: `SET SESSION MAX_EXECUTION_TIME = <ms>`
+    /// (SELECT-only hint, best-effort — the HTTP-level `TimeoutLayer`
+    /// is still the authoritative wall-clock cap). SQLite has no
     /// equivalent server-side kill switch (queries run in-process and
     /// respect the middleware timeout via future cancellation).
     pub async fn connect_all_with_timeout(
@@ -133,9 +139,37 @@ pub async fn connect(
                 ResqlError::Internal(format!("cannot connect datasource '{}': {e}", ds.name))
             })?;
         Ok(Pool::Sqlite(pool))
+    } else if url.starts_with("mysql://") || url.starts_with("mariadb://") {
+        let opts: MySqlConnectOptions = url
+            .parse()
+            .map_err(|e| ResqlError::Internal(format!("bad MySQL URL for '{}': {e}", ds.name)))?;
+        // MySQL's analogue to Postgres `statement_timeout` is
+        // `MAX_EXECUTION_TIME` — milliseconds, SELECT-only, hint-shaped
+        // (the optimizer may still finish past the budget on
+        // specific plans). Applied belt-and-braces alongside the
+        // middleware `TimeoutLayer`; the latter remains the
+        // authoritative wall-clock cap.
+        let statement_timeout_ms = statement_timeout_secs.map(|s| s.saturating_mul(1000));
+        let mut pool_opts = MySqlPoolOptions::new()
+            .max_connections(ds.max_connections)
+            .acquire_timeout(Duration::from_secs(ds.acquire_timeout_seconds));
+        if let Some(ms) = statement_timeout_ms {
+            let sql = format!("SET SESSION MAX_EXECUTION_TIME = {ms}");
+            pool_opts = pool_opts.after_connect(move |conn, _meta| {
+                let sql = sql.clone();
+                Box::pin(async move {
+                    conn.execute(sql.as_str()).await?;
+                    Ok(())
+                })
+            });
+        }
+        let pool = pool_opts.connect_with(opts).await.map_err(|e| {
+            ResqlError::Internal(format!("cannot connect datasource '{}': {e}", ds.name))
+        })?;
+        Ok(Pool::MySql(pool))
     } else {
         Err(ResqlError::Internal(format!(
-            "unsupported datasource URL scheme for '{}': must start with postgres://, postgresql://, or sqlite:",
+            "unsupported datasource URL scheme for '{}': must start with postgres://, postgresql://, mysql://, mariadb://, or sqlite:",
             ds.name
         )))
     }
@@ -164,6 +198,22 @@ fn mask_password_in_url(url: &str) -> String {
 mod tests {
     use super::*;
 
+    #[test]
+    fn mask_password_in_url_covers_mysql_scheme() {
+        // The password masker is scheme-agnostic (operates on userinfo),
+        // but the test suite only ever covered sqlite/postgres before.
+        // Pin it against mysql:// so a future refactor doesn't skip
+        // MySQL URLs on log emission.
+        assert_eq!(
+            mask_password_in_url("mysql://resql:supersecret@db.internal:3306/app"),
+            "mysql://resql:*****@db.internal:3306/app"
+        );
+        assert_eq!(
+            mask_password_in_url("mariadb://user:pw@host:3306/db"),
+            "mariadb://user:*****@host:3306/db"
+        );
+    }
+
     #[tokio::test]
     async fn connects_sqlite_in_memory() {
         let ds = DatasourceConfig {
@@ -183,7 +233,7 @@ mod tests {
     async fn rejects_unknown_scheme() {
         let ds = DatasourceConfig {
             name: "t".into(),
-            url: "mysql://localhost/db".into(),
+            url: "oracle://localhost/db".into(),
             username: "".into(),
             password_env: "".into(),
             password: None,
@@ -192,6 +242,66 @@ mod tests {
         };
         let err = connect(&ds, None).await.unwrap_err();
         assert!(err.to_string().contains("unsupported"));
+        // The error message must enumerate every supported scheme so
+        // operators can see what's valid without diving into source.
+        let msg = err.to_string();
+        for sch in [
+            "postgres://",
+            "postgresql://",
+            "mysql://",
+            "mariadb://",
+            "sqlite:",
+        ] {
+            assert!(
+                msg.contains(sch),
+                "expected error to mention scheme `{sch}`, got: {msg}"
+            );
+        }
+    }
+
+    /// MySQL scheme is recognised by the connect function and only
+    /// fails when the host is unreachable — not with "unsupported
+    /// scheme" (that would mean sqlx-mysql wasn't wired at all).
+    #[tokio::test]
+    async fn mysql_scheme_recognised() {
+        let ds = DatasourceConfig {
+            name: "t".into(),
+            // Deliberately unreachable; what matters is that we attempt
+            // to connect (hit the MySQL branch), not fall through.
+            url: "mysql://resql@127.0.0.1:1/db".into(),
+            username: "".into(),
+            password_env: "".into(),
+            password: None,
+            max_connections: 1,
+            acquire_timeout_seconds: 1,
+        };
+        let err = connect(&ds, None).await.unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            !msg.contains("unsupported"),
+            "mysql:// must be routed to the MySQL branch, got: {msg}"
+        );
+    }
+
+    /// `mariadb://` is a documented alias for `mysql://` — same wire
+    /// protocol, same sqlx driver — so it must take the same branch.
+    #[tokio::test]
+    async fn mariadb_scheme_recognised() {
+        let ds = DatasourceConfig {
+            name: "t".into(),
+            url: "mariadb://resql@127.0.0.1:1/db".into(),
+            username: "".into(),
+            password_env: "".into(),
+            password: None,
+            max_connections: 1,
+            acquire_timeout_seconds: 1,
+        };
+        let err = connect(&ds, None).await.unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            !msg.contains("unsupported"),
+            "mariadb:// must be routed to the MySQL branch, got: {msg}"
+        );
     }
 
     #[tokio::test]

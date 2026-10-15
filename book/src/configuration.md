@@ -37,14 +37,14 @@ is rejected — typos fail startup instead of silently ignoring config.
 |---|---|---|---|
 | `bind` | string | `0.0.0.0:8080` | Listener address. |
 | `max_body_bytes` | integer | `1048576` (1 MiB) | Inbound JSON body cap. Overflow → HTTP 413 in the header-envelope shape. |
-| `request_timeout_seconds` | integer | `30` | Per-request wall-clock cap. 0 refused at boot; overflow → HTTP 504. Postgres pools also `SET statement_timeout` to this value. |
+| `request_timeout_seconds` | integer | `30` | Per-request wall-clock cap. 0 refused at boot; overflow → HTTP 504. Postgres pools also `SET statement_timeout` to this value; MySQL pools `SET SESSION MAX_EXECUTION_TIME` (SELECT-only, hint-shaped — middleware is still the authoritative cap). |
 
 ## `datasources` (list of)
 
 | Field | Type | Default | Purpose |
 |---|---|---|---|
 | `name` | string | *(required)* | Unique label. Referenced from URL project or `X-Datasource` header. |
-| `url` | string | *(required)* | Connection URL. Supported schemes: `postgres://`, `postgresql://`, `sqlite:`. |
+| `url` | string | *(required)* | Connection URL. Supported schemes: `postgres://`, `postgresql://`, `mysql://`, `mariadb://`, `sqlite:`. |
 | `username` | string | `""` | Username to inject in the URL userinfo. Overrides any `user:` already in the URL — the config-supplied value wins (see [issue #27](https://github.com/turnerrainer/Resql/issues/27)). |
 | `password_env` | string | `""` | Env-var **name** holding the password. **Never store passwords in this file.** |
 | `password` | string | `null` | Java-compat plaintext form. If set, compat-shim emits WARN every time. Rejected if `password_env` is also set. |
@@ -310,3 +310,92 @@ resql -c /app/resql.yaml
 
 Every request except `/health` / `/healthz` must now carry
 `Authorization: Bearer $RESQL_INTER_SERVICE_TOKEN`.
+
+## MySQL / MariaDB backend
+
+MySQL and MariaDB are first-class alongside Postgres. Use `mysql://` or
+`mariadb://` as the datasource URL scheme — both land in the same
+driver (the MySQL wire protocol) and are indistinguishable at
+runtime beyond the `/datasources` label.
+
+```yaml
+datasources:
+  - name: analytics
+    url:          "mysql://analytics-db.internal:3306/analytics"
+    username:     "resql_analytics"
+    password_env: "RESQL_ANALYTICS_PASSWORD"
+```
+
+### Writing MySQL-dialect SQL
+
+Each `.sql` file is authored in **its target backend's dialect**.
+Resql does not translate between dialects. A file served by a MySQL
+datasource is MySQL SQL; a file served by a Postgres datasource is
+Postgres SQL. The same Resql instance can serve both; the project →
+datasource routing picks the backend per request.
+
+Common MySQL-specific idioms you'll write directly:
+
+| Need | MySQL dialect |
+|---|---|
+| Upsert | `INSERT … ON DUPLICATE KEY UPDATE …` |
+| Return inserted row | `INSERT …; SELECT … WHERE id = LAST_INSERT_ID()` (wrap with `-- @transactional` for atomicity) |
+| JSON field access | `data->>'$.name'` (JSONPath required) |
+| Cast | `CAST(value AS SIGNED)` (no `::` operator) |
+
+### Array parameters
+
+MySQL has no native array type. A declaration can still use `type:
+array` with an `items:` block — element-level type validation runs
+the same as on Postgres — but the bind sends **JSON**. The SQL side
+uses JSON predicates:
+
+```yaml
+params:
+  ids: { type: array, items: { type: integer }, required: true }
+```
+
+```sql
+-- MySQL 8.0.17+
+SELECT id, login FROM users WHERE id MEMBER OF(:ids);
+
+-- Portable to earlier 8.x
+SELECT id, login FROM users WHERE JSON_CONTAINS(:ids, CAST(id AS JSON));
+
+-- With explicit expansion
+SELECT u.id, u.login FROM users u
+JOIN JSON_TABLE(:ids, '$[*]' COLUMNS (id INT PATH '$')) jt ON jt.id = u.id;
+```
+
+See `DIVERGENCES.md` DIV-023 for the full contract.
+
+### Row → JSON type mapping
+
+| MySQL type | JSON output |
+|---|---|
+| `TINYINT` / `SMALLINT` / `MEDIUMINT` / `INT` / `BIGINT` (± signed) | number (widened to i64) |
+| `BIGINT UNSIGNED` | number (u64; may exceed `i64::MAX`) |
+| `FLOAT` / `DOUBLE` | number |
+| `DECIMAL` / `NUMERIC` | string (precision preserved; same policy as Postgres NUMERIC) |
+| `DATE` | `YYYY-MM-DD` |
+| `DATETIME` / `TIMESTAMP` | `YYYY-MM-DDTHH:MM:SS[.ffffff]` (ISO 8601 with `T`) |
+| `TIME` | `HH:MM:SS` |
+| `YEAR` | number |
+| `CHAR` / `VARCHAR` / `TEXT*` | string |
+| `ENUM` | string (the member label) |
+| `SET` | string (comma-separated member list — MySQL's wire shape) |
+| `JSON` | unwrapped JSON value (array / object / scalar) |
+| `BIT(1)` | boolean |
+| `BIT(N > 1)` | hex string |
+| `BINARY` / `VARBINARY` / `BLOB*` | string if valid UTF-8, else null |
+
+### Query timeout caveat
+
+`request_timeout_seconds > 0` applies `SET SESSION MAX_EXECUTION_TIME
+= <ms>` on every MySQL connection, mirroring the Postgres
+`statement_timeout` posture. **Important semantic difference**:
+MySQL's `MAX_EXECUTION_TIME` is SELECT-only and hint-shaped — the
+optimizer may still finish past the budget on specific plans, and
+non-SELECT statements ignore it entirely. The middleware
+`TimeoutLayer` remains the authoritative wall-clock cap; MySQL's
+server-side hint is defence in depth.

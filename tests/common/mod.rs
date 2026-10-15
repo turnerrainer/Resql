@@ -17,6 +17,7 @@ use resql::health::StartTime;
 use resql::loader;
 use resql::server::{self, AppState};
 use serde_json::Value;
+use sqlx::mysql::MySqlPoolOptions;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::sqlite::SqlitePoolOptions;
 use tempfile::TempDir;
@@ -34,6 +35,10 @@ pub struct TestAppBuilder {
     /// Extra datasources hitting a real Postgres URL. Populated by
     /// `with_postgres_datasource(name, url)`. Coexists with SQLite ones.
     pg_datasources: Vec<(String, String)>,
+    /// Extra datasources hitting a real MySQL URL. Populated by
+    /// `with_mysql_datasource(name, url)`. Coexists with SQLite /
+    /// Postgres ones.
+    mysql_datasources: Vec<(String, String)>,
     project_map: Vec<(String, String)>,
     allow_header: bool,
     max_body: usize,
@@ -58,6 +63,7 @@ impl TestAppBuilder {
             seed_sql: Vec::new(),
             datasource_names: vec!["demo".into()],
             pg_datasources: Vec::new(),
+            mysql_datasources: Vec::new(),
             project_map: Vec::new(),
             allow_header: true,
             max_body: 1_048_576,
@@ -118,7 +124,16 @@ impl TestAppBuilder {
         self
     }
 
-    /// Skip SQLite entirely. Use when the test is Postgres-only.
+    /// Add a MySQL-backed datasource by URL. Coexists with any
+    /// SQLite / Postgres datasources set up via `with_datasources` /
+    /// `with_postgres_datasource`.
+    pub fn with_mysql_datasource(mut self, name: &str, url: &str) -> Self {
+        self.mysql_datasources.push((name.into(), url.into()));
+        self
+    }
+
+    /// Skip SQLite entirely. Use when the test is Postgres-only or
+    /// MySQL-only.
     pub fn no_sqlite_datasources(mut self) -> Self {
         self.datasource_names.clear();
         self
@@ -207,6 +222,25 @@ impl TestAppBuilder {
                     panic!("cannot connect Postgres datasource '{name}' at {url}: {e}")
                 });
             registry.insert(name.clone(), Pool::Postgres(pool_inner));
+            cfg_datasources.push(DatasourceConfig {
+                name: name.clone(),
+                url: url.clone(),
+                username: "".into(),
+                password_env: "".into(),
+                password: None,
+                max_connections: 1,
+                acquire_timeout_seconds: 5,
+            });
+        }
+        for (name, url) in &self.mysql_datasources {
+            let pool_inner = MySqlPoolOptions::new()
+                .max_connections(1)
+                .connect(url)
+                .await
+                .unwrap_or_else(|e| {
+                    panic!("cannot connect MySQL datasource '{name}' at {url}: {e}")
+                });
+            registry.insert(name.clone(), Pool::MySql(pool_inner));
             cfg_datasources.push(DatasourceConfig {
                 name: name.clone(),
                 url: url.clone(),

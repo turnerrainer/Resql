@@ -6,6 +6,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **MySQL / MariaDB support (first-class backend).** `mysql://` and
+  `mariadb://` URLs are now accepted alongside `postgres://` /
+  `postgresql://` / `sqlite:`. Both schemes land in a new `Pool::MySql`
+  variant and speak the MySQL wire protocol via `sqlx-mysql`. Every
+  datasource in `resql.yaml` picks its backend by URL scheme as before;
+  per-pool isolation and routing are unchanged.
+  - Parameter rewriting under the new `Dialect::MySql` emits positional
+    `?` placeholders (as MySQL expects); a repeated `:name` binds the
+    value at each occurrence (unlike Postgres `$N` / SQLite `?N` which
+    reuse one slot).
+  - Server-side query timeout: when `server.request_timeout_seconds > 0`,
+    every MySQL pool connection runs `SET SESSION MAX_EXECUTION_TIME = <ms>`
+    in its `after_connect` hook. Note the MySQL semantics — SELECT-only
+    and hint-shaped — so the middleware `TimeoutLayer` remains the
+    authoritative wall-clock cap.
+  - Row → JSON mapper covers the common MySQL types: all integer widths
+    (signed + unsigned, including `BIGINT UNSIGNED` beyond `i64::MAX`),
+    `FLOAT`/`DOUBLE`, `DECIMAL` → string (precision preserved),
+    `DATE`/`DATETIME`/`TIMESTAMP`/`TIME`/`YEAR` → ISO-8601 strings matching
+    the Postgres path (`T` separator for datetimes, trailing `Z` for
+    UTC-anchored instants), `CHAR` / `VARCHAR` / `TEXT*` / `ENUM` / `SET` →
+    string, `JSON` → unwrapped JSON value, `BIT(1)` → bool, binary families
+    → UTF-8 string if valid else null.
+  - `/datasources` reports driver class `com.mysql.cj.jdbc.Driver` for
+    pools of either scheme.
+  - **Array params bind as JSON strings.** MySQL has no native array type.
+    Authors use `JSON_CONTAINS(:ids, CAST(id AS JSON))`, `JSON_TABLE(:ids,
+    '$[*]' …)`, or `id MEMBER OF(:ids)` (MySQL 8.0.17+) on the SQL side.
+    See `DIVERGENCES.md` DIV-023.
+  - **BREAKING for configs that depended on the old reject message.** An
+    unsupported scheme now surfaces as `must start with postgres://,
+    postgresql://, mysql://, mariadb://, or sqlite:` (was: without the two
+    MySQL schemes). Operators who grepped the old string in boot logs
+    should update their alerts. HTTP wire shape is unchanged — this is a
+    config-boot error only.
+  - Integration tests gated by `TEST_MYSQL_URL` (CI workflow runs a
+    `mysql:8.0` service container and exports the URL). Unit tests for
+    the rewriter / URL-mask / redact helpers run on every toolchain.
+
 ## [0.4.3-alpha] - 2026-09-18
 
 **h2ck.me v1 NEXT-TASKS follow-up batch + one transitive-security bump.**
