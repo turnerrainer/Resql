@@ -124,6 +124,15 @@ you plan to ship.
   `-- @transactional` behaves the same on failure — the whole SQL file's
   execution rolls back. Without the marker, mid-string failures in
   multi-statement SQL may leave earlier statements committed.
+- **MySQL multi-statement SQL → 400 `BadSqlGrammarException`.** MySQL's
+  prepared-statement protocol can only hold ONE statement, so a `.sql`
+  file like `INSERT …; SELECT …` served from a `mysql://` /
+  `mariadb://` datasource fails with this error class even though the
+  same shape works on Postgres (which accepts multi-statement SQL via
+  the extended-query protocol). Fix: split into two endpoints — one
+  POST for the INSERT, one GET for the SELECT. Full recipe:
+  [MySQL / MariaDB backend →
+  Multi-statement limitation](./mysql-setup.md#multi-statement-limitation).
 
 ## Debugging
 
