@@ -7,17 +7,47 @@
 [advisories]
 ignore = [
     # RUSTSEC-2023-0071 — Marvin timing side-channel in the `rsa` crate.
-    # `rsa` is pulled into Cargo.lock via sqlx-mysql (optional dep of
-    # sqlx-macros-core), but Resql does NOT enable the mysql
-    # backend and sqlx-mysql is not compiled into the released binary
-    # (verified via `cargo build --release` — only sqlx-core, sqlx-postgres,
-    # sqlx-sqlite show up). No runtime attack surface. Re-audit if the
-    # mysql backend is ever enabled (see tasks/backlog/005-mysql-driver-optional.md).
+    # Reachable via `sqlx-mysql` (enabled as of the MySQL support PR,
+    # [Unreleased]) which uses `rsa` inside the `caching_sha2_password`
+    # auth plugin — MySQL 8.0's default authenticator.
     #
-    # Last verified 2026-09-18: `cargo tree --all-features --target
-    # x86_64-unknown-linux-gnu -i rsa` still reports "nothing to print"
-    # — rsa is unreachable through the enabled feature set. No upstream
-    # fix released for rsa 0.9.x as of this date. Next review 2026-12-18.
+    # Why the ignore remains correct under MySQL-enabled builds:
+    #
+    # The Marvin attack is a timing side-channel on RSA PKCS#1 v1.5
+    # **decryption**. The attacker's leverage is to send chosen
+    # ciphertexts to a system that holds the RSA private key, time the
+    # decryption, and recover bits of the key over many requests.
+    #
+    # Resql is the MySQL **client**:
+    #   - We hold no RSA private key. We never decrypt.
+    #   - `caching_sha2_password` uses the `rsa` crate to **encrypt our
+    #     password** with the server's RSA **public** key (sent in-band
+    #     during the auth handshake), once per pool connection, before
+    #     transmitting the password over the socket.
+    #   - Encryption with a public key is not the target of this
+    #     advisory. Resql's `rsa` call site is a one-shot public-key
+    #     encrypt during the handshake with a MySQL server we trust
+    #     by configuration — there is no attacker-controlled
+    #     decryption to time.
+    #
+    # Operational mitigation (defence in depth, not required for the
+    # Marvin posture): the handshake-encrypted password is sent over
+    # whatever socket sqlx opened — operators who want the connection
+    # itself confidential should set `?sslmode=required` on the MySQL
+    # URL (sqlx supports it).
+    #
+    # Last verified 2026-10-15 (MySQL backend wired in [Unreleased]):
+    #  - `cargo tree -i rsa` resolves one path: rsa 0.9.x → sqlx-mysql
+    #    → sqlx → resql. No application code outside the handshake
+    #    reaches `rsa`.
+    #  - rsa 0.9.x upstream has no fix as of this review; the project
+    #    treatment is "constant-time path is in a future release"
+    #    (tracked by rsa issue tracker).
+    #  - Next review 2027-01-15. Re-verify: (a) rsa publishes a
+    #    constant-time release — bump + drop this ignore; or
+    #    (b) sqlx-mysql ships an auth-plugin surface that lets us
+    #    disable `caching_sha2_password` for deployments that use
+    #    `mysql_native_password` (no RSA).
     "RUSTSEC-2023-0071",
 
     # RUSTSEC-2026-0235 — rkyv archive validation OOB read on Rc/Arc.

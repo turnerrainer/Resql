@@ -27,6 +27,7 @@ use common::TestAppBuilder;
 use serde_json::{json, Value};
 use sqlx::mysql::MySqlPoolOptions;
 use sqlx::Executor;
+use tokio::sync::OnceCell;
 
 fn mysql_url() -> Option<String> {
     std::env::var("TEST_MYSQL_URL").ok()
@@ -46,9 +47,27 @@ macro_rules! require_mysql {
     };
 }
 
-/// Drop + create the whole fixture schema. Idempotent — safe to call
-/// at the start of every test. Done over a dedicated short-lived pool
-/// so it never touches the Resql side's connection or statement cache.
+/// One-time schema bootstrap per test binary. `cargo test` runs
+/// integration tests inside a single binary with parallel threads;
+/// without a single-shot gate, every test would race on
+/// DROP/CREATE against the shared `TEST_MYSQL_URL` database and
+/// fail with "Table X already exists" / FK-reference errors /
+/// InnoDB deadlocks. Mirrors how the Postgres suite depends on
+/// Liquibase being applied once before `cargo test` runs.
+///
+/// Tests that need mutation isolation prefix every row with
+/// `uniq_suffix()` so parallel tests never clash on unique
+/// constraints and no test asserts on a globally-hardcoded value.
+static SCHEMA: OnceCell<()> = OnceCell::const_new();
+
+async fn ensure_schema(url: &str) {
+    SCHEMA
+        .get_or_init(|| async {
+            bootstrap_schema(url).await;
+        })
+        .await;
+}
+
 async fn bootstrap_schema(url: &str) {
     let admin = MySqlPoolOptions::new()
         .max_connections(1)
@@ -159,9 +178,10 @@ async fn bootstrap_schema(url: &str) {
 }
 
 /// Build a Resql test app wired to the live MySQL. Mirrors the
-/// Postgres app factory in `integration_postgres.rs`.
+/// Postgres app factory in `integration_postgres.rs`. Schema is
+/// bootstrapped exactly once per test binary (see `SCHEMA`).
 async fn app_with_mysql(url: &str) -> common::TestApp {
-    bootstrap_schema(url).await;
+    ensure_schema(url).await;
     TestAppBuilder::new()
         .no_sqlite_datasources()
         .with_mysql_datasource("my", url)
@@ -231,7 +251,11 @@ async fn app_with_mysql(url: &str) -> common::TestApp {
         )
         .with_sql(
             "my/GET/types/zoo.sql",
-            "SELECT ti, ti_u, si, mi, ii, bi, bi_u, fl, db, de, dt, dd, tt, yr, ch, vc, tx, js, en, st, bl FROM types_zoo ORDER BY id DESC LIMIT 1",
+            // Pin by the seed row's `ti = -5` so future tests that
+            // might insert into types_zoo don't shift what this
+            // test reads. Bootstrap inserts exactly one row with
+            // ti = -5 and never again.
+            "SELECT ti, ti_u, si, mi, ii, bi, bi_u, fl, db, de, dt, dd, tt, yr, ch, vc, tx, js, en, st, bl FROM types_zoo WHERE ti = -5 LIMIT 1",
         )
         .with_sql(
             "my/POST/arrays/by-ids.sql",
@@ -250,28 +274,35 @@ async fn my_find_user_by_login() {
     let url = require_mysql!();
     let app = app_with_mysql(&url).await;
 
-    // Seed one user via a direct admin connection so we don't tangle
-    // this test with the INSERT path (which has its own tests below).
+    // Unique login so parallel tests don't collide on
+    // users.login UNIQUE. Seeded directly rather than through the
+    // INSERT endpoint so this test only exercises the SELECT path.
+    let login = format!("find_{}", uniq_suffix());
     let admin = MySqlPoolOptions::new()
         .max_connections(1)
         .connect(&url)
         .await
         .unwrap();
-    sqlx::query(
-        "INSERT INTO users (login, email, status) VALUES ('alice', 'alice@example.com', 'active')",
-    )
-    .execute(&admin)
-    .await
-    .unwrap();
+    sqlx::query("INSERT INTO users (login, email, status) VALUES (?, ?, 'active')")
+        .bind(&login)
+        .bind(format!("{login}@example.com"))
+        .execute(&admin)
+        .await
+        .unwrap();
     admin.close().await;
 
     let (status, body) = app
-        .request("GET", "/my/users/find-by-login?login=alice", None, &[])
+        .request(
+            "GET",
+            &format!("/my/users/find-by-login?login={login}"),
+            None,
+            &[],
+        )
         .await;
     assert_eq!(status, 200, "body = {body}");
     let row = &body.as_array().unwrap()[0];
-    assert_eq!(row["login"], "alice");
-    assert_eq!(row["email"], "alice@example.com");
+    assert_eq!(row["login"], login);
+    assert_eq!(row["email"], format!("{login}@example.com"));
     assert_eq!(row["status"], "active");
     assert!(row["id"].is_number());
 }
@@ -281,6 +312,17 @@ async fn my_list_active_users_multi_row() {
     let url = require_mysql!();
     let app = app_with_mysql(&url).await;
 
+    // Insert three users carrying a shared marker status so we can
+    // filter cleanly even when other tests have left rows in the
+    // table. The status column is used by the Resql endpoint as the
+    // :status filter — reusing it as a per-test tag keeps the query
+    // predicate honest.
+    let suf = uniq_suffix();
+    let want_active_a = format!("list_a_{suf}");
+    let want_active_b = format!("list_b_{suf}");
+    let want_disabled = format!("list_c_{suf}");
+    let marker = format!("active_{suf}");
+
     let admin = MySqlPoolOptions::new()
         .max_connections(1)
         .connect(&url)
@@ -288,24 +330,43 @@ async fn my_list_active_users_multi_row() {
         .unwrap();
     sqlx::query(
         "INSERT INTO users (login, email, status) VALUES
-         ('alice', 'a@x', 'active'),
-         ('bob',   'b@x', 'active'),
-         ('eve',   'e@x', 'disabled')",
+         (?, 'a@x', ?),
+         (?, 'b@x', ?),
+         (?, 'c@x', 'disabled')",
     )
+    .bind(&want_active_a)
+    .bind(&marker)
+    .bind(&want_active_b)
+    .bind(&marker)
+    .bind(&want_disabled)
     .execute(&admin)
     .await
     .unwrap();
     admin.close().await;
 
     let (status, body) = app
-        .request("GET", "/my/users/list-active?status=active", None, &[])
+        .request(
+            "GET",
+            &format!("/my/users/list-active?status={marker}"),
+            None,
+            &[],
+        )
         .await;
     assert_eq!(status, 200, "body = {body}");
     let arr = body.as_array().unwrap();
     let logins: Vec<&str> = arr.iter().map(|r| r["login"].as_str().unwrap()).collect();
-    assert!(logins.contains(&"alice"));
-    assert!(logins.contains(&"bob"));
-    assert!(!logins.contains(&"eve"));
+    assert!(
+        logins.contains(&want_active_a.as_str()),
+        "expected {want_active_a} in {logins:?}"
+    );
+    assert!(
+        logins.contains(&want_active_b.as_str()),
+        "expected {want_active_b} in {logins:?}"
+    );
+    assert!(
+        !logins.contains(&want_disabled.as_str()),
+        "{want_disabled} should NOT appear (status=disabled)"
+    );
 }
 
 // ─── Timestamp / date formatting matches the Postgres path ───────────
@@ -315,19 +376,26 @@ async fn my_timestamp_serialises_as_iso_t_separator() {
     let url = require_mysql!();
     let app = app_with_mysql(&url).await;
 
+    let login = format!("ts_{}", uniq_suffix());
     let admin = MySqlPoolOptions::new()
         .max_connections(1)
         .connect(&url)
         .await
         .unwrap();
-    sqlx::query("INSERT INTO users (login) VALUES ('aliceT')")
+    sqlx::query("INSERT INTO users (login) VALUES (?)")
+        .bind(&login)
         .execute(&admin)
         .await
         .unwrap();
     admin.close().await;
 
     let (status, body) = app
-        .request("GET", "/my/users/created-at?login=aliceT", None, &[])
+        .request(
+            "GET",
+            &format!("/my/users/created-at?login={login}"),
+            None,
+            &[],
+        )
         .await;
     assert_eq!(status, 200, "body = {body}");
     let created = body[0]["createdAt"].as_str().unwrap();
@@ -345,27 +413,35 @@ async fn my_json_column_comes_back_as_json_value() {
     let url = require_mysql!();
     let app = app_with_mysql(&url).await;
 
+    let login = format!("order_{}", uniq_suffix());
     let admin = MySqlPoolOptions::new()
         .max_connections(1)
         .connect(&url)
         .await
         .unwrap();
-    sqlx::query("INSERT INTO users (login) VALUES ('ordertest')")
+    sqlx::query("INSERT INTO users (login) VALUES (?)")
+        .bind(&login)
         .execute(&admin)
         .await
         .unwrap();
     sqlx::query(
         "INSERT INTO orders (user_id, total_cents, items)
          SELECT id, 500, JSON_ARRAY(JSON_OBJECT('sku','A1','qty',1), JSON_OBJECT('sku','B2','qty',3))
-         FROM users WHERE login = 'ordertest'",
+         FROM users WHERE login = ?",
     )
+    .bind(&login)
     .execute(&admin)
     .await
     .unwrap();
     admin.close().await;
 
     let (status, body) = app
-        .request("GET", "/my/orders/by-user?login=ordertest", None, &[])
+        .request(
+            "GET",
+            &format!("/my/orders/by-user?login={login}"),
+            None,
+            &[],
+        )
         .await;
     assert_eq!(status, 200, "body = {body}");
     let arr = body.as_array().unwrap();
@@ -615,6 +691,10 @@ async fn my_array_param_bound_as_json_works_with_json_contains() {
     let url = require_mysql!();
     let app = app_with_mysql(&url).await;
 
+    let suf = uniq_suffix();
+    let l1 = format!("arr1_{suf}");
+    let l2 = format!("arr2_{suf}");
+    let l3 = format!("arr3_{suf}");
     let admin = MySqlPoolOptions::new()
         .max_connections(1)
         .connect(&url)
@@ -622,18 +702,24 @@ async fn my_array_param_bound_as_json_works_with_json_contains() {
         .unwrap();
     sqlx::query(
         "INSERT INTO users (login, email, status) VALUES
-         ('arr1', NULL, 'active'),
-         ('arr2', NULL, 'active'),
-         ('arr3', NULL, 'active')",
+         (?, NULL, 'active'),
+         (?, NULL, 'active'),
+         (?, NULL, 'active')",
     )
+    .bind(&l1)
+    .bind(&l2)
+    .bind(&l3)
     .execute(&admin)
     .await
     .unwrap();
     // Grab the ids back so we can slice [first, third] and leave the
     // middle one out — proves the filter actually filters.
     let got = sqlx::query_as::<_, (i64, String)>(
-        "SELECT id, login FROM users WHERE login IN ('arr1','arr2','arr3') ORDER BY id",
+        "SELECT id, login FROM users WHERE login IN (?, ?, ?) ORDER BY id",
     )
+    .bind(&l1)
+    .bind(&l2)
+    .bind(&l3)
     .fetch_all(&admin)
     .await
     .unwrap();
@@ -648,6 +734,7 @@ async fn my_array_param_bound_as_json_works_with_json_contains() {
     assert_eq!(status, 200, "body = {body}");
     let arr = body.as_array().unwrap();
     let logins: Vec<&str> = arr.iter().map(|r| r["login"].as_str().unwrap()).collect();
+    // Query only returns the two ids we asked for, in ascending id order.
     assert_eq!(logins, vec![got[0].1.as_str(), got[2].1.as_str()]);
 }
 
@@ -678,10 +765,15 @@ async fn my_transactional_endpoint_commits_on_success_and_rolls_back_on_error() 
 // ─── Helpers ─────────────────────────────────────────────────────────
 
 fn uniq_suffix() -> String {
-    // Nanos-tail avoids login-unique collisions between parallel tests
-    // sharing the same seeded schema.
-    let n = std::time::SystemTime::now()
+    // Process-wide monotonic counter: wall-clock nanos alone can
+    // collide across parallel tokio tasks resolving at the same
+    // instant. The counter guarantees distinct suffixes per test
+    // invocation within the binary.
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap();
-    format!("{}{}", n.as_millis(), n.subsec_nanos())
+    format!("{}_{}", now.as_millis(), n)
 }
