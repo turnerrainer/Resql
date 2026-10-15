@@ -13,6 +13,15 @@ yanked = "deny"
 # NOTE: full rationale for each ignore lives in `.cargo/audit.toml` so
 # both tools share one source of truth. Keep this list in lockstep.
 ignore = [
+    # RUSTSEC-2023-0071 — Marvin timing side-channel in the `rsa` crate.
+    # Reachable via `sqlx-mysql` (enabled with the MySQL support PR).
+    # Does NOT apply to our MySQL-client posture: `rsa` is used only
+    # to encrypt the password with the server's RSA public key during
+    # the `caching_sha2_password` handshake. Marvin targets RSA
+    # private-key decryption; Resql holds no private key and never
+    # decrypts. See `.cargo/audit.toml` for the full write-up and the
+    # next-review date.
+    "RUSTSEC-2023-0071",
     # RUSTSEC-2024-0449 — `unsafe-libyaml` unmaintained warning (no CVE).
     # Reaches us via serde_yaml_ng (serde_yaml is explicitly banned
     # above). Operator-controlled YAML parsed only at process start

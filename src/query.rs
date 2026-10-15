@@ -1,4 +1,5 @@
 use serde_json::{Map, Value};
+use sqlx::mysql::MySqlRow;
 use sqlx::postgres::{PgRow, PgTypeKind};
 use sqlx::sqlite::SqliteRow;
 use sqlx::{Column, Row, TypeInfo};
@@ -105,16 +106,32 @@ pub fn rewrite_named_params(sql: &str, dialect: Dialect) -> (String, Vec<String>
                 end += 1;
             }
             let name = std::str::from_utf8(&bytes[start..end]).unwrap().to_string();
-            let position = match params.iter().position(|p| p == &name) {
-                Some(p) => p,
-                None => {
-                    params.push(name.clone());
-                    params.len() - 1
-                }
-            };
             match dialect {
-                Dialect::Postgres => out.push_str(&format!("${}", position + 1)),
-                Dialect::Sqlite => out.push_str(&format!("?{}", position + 1)),
+                // Postgres `$N` / SQLite `?N` are indexed placeholders:
+                // a `:x` that recurs reuses the same slot and binds once.
+                Dialect::Postgres | Dialect::Sqlite => {
+                    let position = match params.iter().position(|p| p == &name) {
+                        Some(p) => p,
+                        None => {
+                            params.push(name.clone());
+                            params.len() - 1
+                        }
+                    };
+                    if matches!(dialect, Dialect::Postgres) {
+                        out.push_str(&format!("${}", position + 1));
+                    } else {
+                        out.push_str(&format!("?{}", position + 1));
+                    }
+                }
+                // MySQL `?` is positional-anonymous: no index, every
+                // occurrence binds separately. A `:x` that recurs
+                // emits `?` each time and the bind walker pushes the
+                // value once per occurrence — correct and matches the
+                // wire protocol.
+                Dialect::MySql => {
+                    out.push('?');
+                    params.push(name);
+                }
             }
             i = end;
             continue;
@@ -153,6 +170,7 @@ fn is_ident_cont(c: char) -> bool {
 pub enum Dialect {
     Postgres,
     Sqlite,
+    MySql,
 }
 
 impl From<&Pool> for Dialect {
@@ -160,6 +178,7 @@ impl From<&Pool> for Dialect {
         match p {
             Pool::Postgres(_) => Dialect::Postgres,
             Pool::Sqlite(_) => Dialect::Sqlite,
+            Pool::MySql(_) => Dialect::MySql,
         }
     }
 }
@@ -182,6 +201,7 @@ pub async fn execute(
     match pool {
         Pool::Postgres(pg) => run_pg(pg, &rewritten, &param_names, &param_map, declaration).await,
         Pool::Sqlite(sq) => run_sqlite(sq, &rewritten, &param_names, &param_map).await,
+        Pool::MySql(my) => run_mysql(my, &rewritten, &param_names, &param_map, declaration).await,
     }
 }
 
@@ -209,6 +229,12 @@ pub async fn execute_transactional(
             let mut tx = sq.begin().await.map_err(sql_err)?;
             let result = run_sqlite(&mut *tx, &rewritten, &param_names, &param_map).await;
             finalise_tx_sqlite(tx, result).await
+        }
+        Pool::MySql(my) => {
+            let mut tx = my.begin().await.map_err(sql_err)?;
+            let result =
+                run_mysql(&mut *tx, &rewritten, &param_names, &param_map, declaration).await;
+            finalise_tx_mysql(tx, result).await
         }
     }
 }
@@ -255,6 +281,21 @@ pub async fn execute_batch(
             let mut all = Vec::with_capacity(total);
             for (i, pm) in normalised.iter().enumerate() {
                 match run_sqlite(&mut *tx, &rewritten, &param_names, pm).await {
+                    Ok(rows) => all.push(rows),
+                    Err(e) => {
+                        let _ = tx.rollback().await;
+                        return Err(generic_batch_failure(i, total, e));
+                    }
+                }
+            }
+            tx.commit().await.map_err(sql_err)?;
+            Ok(all)
+        }
+        Pool::MySql(my) => {
+            let mut tx = my.begin().await.map_err(sql_err)?;
+            let mut all = Vec::with_capacity(total);
+            for (i, pm) in normalised.iter().enumerate() {
+                match run_mysql(&mut *tx, &rewritten, &param_names, pm, declaration).await {
                     Ok(rows) => all.push(rows),
                     Err(e) => {
                         let _ = tx.rollback().await;
@@ -724,6 +765,22 @@ async fn finalise_tx_sqlite<'c>(
     }
 }
 
+async fn finalise_tx_mysql<'c>(
+    tx: sqlx::Transaction<'c, sqlx::MySql>,
+    result: Result<Vec<Map<String, Value>>, ResqlError>,
+) -> Result<Vec<Map<String, Value>>, ResqlError> {
+    match result {
+        Ok(rows) => {
+            tx.commit().await.map_err(sql_err)?;
+            Ok(rows)
+        }
+        Err(e) => {
+            let _ = tx.rollback().await;
+            Err(e)
+        }
+    }
+}
+
 async fn run_pg<'e, E>(
     exec: E,
     sql: &str,
@@ -767,6 +824,38 @@ where
     }
     let rows = q.fetch_all(exec).await.map_err(sql_err)?;
     Ok(rows.iter().map(sqlite_row_to_json).collect())
+}
+
+/// MySQL execution path. `names` is the parameter emission order from
+/// `rewrite_named_params` under `Dialect::MySql` — one entry per `?`,
+/// so a `:x` that appears twice has two `"x"` entries. The bind walker
+/// iterates `names` in order so repeated params bind the same value
+/// each time, matching the wire protocol's positional-anonymous `?`.
+///
+/// Bind type comes from the **declared** `ParamType`, same discipline
+/// as `run_pg` — the declaration is the single source of truth for
+/// wire typing. Arrays bind as JSON strings (see `bind_mysql`): MySQL
+/// has no native array type, so authors use JSON functions
+/// (`JSON_CONTAINS`, `JSON_TABLE`, `MEMBER OF`) on the SQL side.
+async fn run_mysql<'e, E>(
+    exec: E,
+    sql: &str,
+    names: &[String],
+    params: &Map<String, Value>,
+    declaration: &Declaration,
+) -> Result<Vec<Map<String, Value>>, ResqlError>
+where
+    E: sqlx::Executor<'e, Database = sqlx::MySql>,
+{
+    let mut q = sqlx::query(sql);
+    for name in names {
+        let v = params.get(name).cloned().unwrap_or(Value::Null);
+        let declared = declaration.params.get(name);
+        let declared_ty = declared.map(|p| p.ty).unwrap_or(ParamType::String);
+        q = bind_mysql(q, v, declared_ty);
+    }
+    let rows = q.fetch_all(exec).await.map_err(sql_err)?;
+    Ok(rows.iter().map(mysql_row_to_json).collect())
 }
 
 /// Bind one JSON value into a Postgres query at the position of the next
@@ -1086,6 +1175,73 @@ fn bind_sqlite<'q>(
     }
 }
 
+/// Bind one JSON value into a MySQL query at the next `?` placeholder.
+///
+/// Bind type comes from the declared `ParamType` — same OID-pin
+/// discipline as `bind_pg`. MySQL doesn't cache prepared statement
+/// types across pool connections the way Postgres does, but keeping
+/// the declared-type contract uniform means authors reason about one
+/// rule: "the declaration decides the wire type."
+///
+/// **Arrays bind as JSON strings.** MySQL has no native array type.
+/// Authors use JSON predicates on the SQL side:
+///   - `WHERE JSON_CONTAINS(:ids, CAST(id AS JSON))`
+///   - `JOIN JSON_TABLE(:ids, '$[*]' COLUMNS (id INT PATH '$')) jt`
+///   - `WHERE id MEMBER OF(:ids)`   (MySQL 8.0.17+)
+///
+/// This mirrors how MySQL authors already pass lists through prepared
+/// statements; no DSL-level translation layer exists.
+fn bind_mysql<'q>(
+    q: sqlx::query::Query<'q, sqlx::MySql, sqlx::mysql::MySqlArguments>,
+    v: Value,
+    declared_ty: ParamType,
+) -> sqlx::query::Query<'q, sqlx::MySql, sqlx::mysql::MySqlArguments> {
+    match declared_ty {
+        ParamType::String | ParamType::Uuid => match v {
+            Value::Null => q.bind(Option::<String>::None),
+            Value::String(s) => q.bind(s),
+            other => q.bind(other.to_string()),
+        },
+        // DATE / DATETIME bind as string: MySQL accepts ISO-8601
+        // literals via implicit conversion and this keeps the wire
+        // shape consistent with how callers send the value (a JSON
+        // string). validate_params has already enforced parseability
+        // of the semantic format upstream.
+        ParamType::Date | ParamType::Datetime => match v {
+            Value::Null => q.bind(Option::<String>::None),
+            Value::String(s) => q.bind(s),
+            other => q.bind(other.to_string()),
+        },
+        ParamType::Integer => match v {
+            Value::Null => q.bind(Option::<i64>::None),
+            Value::Number(n) => q.bind(n.as_i64().unwrap_or_default()),
+            _ => q.bind(Option::<i64>::None),
+        },
+        ParamType::Number => match v {
+            Value::Null => q.bind(Option::<f64>::None),
+            Value::Number(n) => q.bind(n.as_f64().unwrap_or_default()),
+            _ => q.bind(Option::<f64>::None),
+        },
+        ParamType::Boolean => match v {
+            // MySQL has no native boolean — TINYINT(1) is the
+            // convention. sqlx binds Rust bool as that type.
+            Value::Null => q.bind(Option::<bool>::None),
+            Value::Bool(b) => q.bind(b),
+            _ => q.bind(Option::<bool>::None),
+        },
+        ParamType::Array => match v {
+            Value::Null => q.bind(Option::<String>::None),
+            Value::Array(_) => q.bind(v.to_string()),
+            other => q.bind(other.to_string()),
+        },
+        ParamType::Object => match v {
+            Value::Null => q.bind(Option::<String>::None),
+            Value::Object(_) => q.bind(v.to_string()),
+            other => q.bind(other.to_string()),
+        },
+    }
+}
+
 /// Decode a Postgres value at `idx` as UTF-8 text via its raw wire form.
 /// Used for column kinds sqlx doesn't include in its built-in `String`
 /// compatibility set (currently: user-defined enums). Postgres transmits
@@ -1138,6 +1294,16 @@ fn sqlite_row_to_json(row: &SqliteRow) -> Map<String, Value> {
     for (idx, col) in row.columns().iter().enumerate() {
         let key = snake_to_camel(col.name());
         let value = sqlite_column_value(row, idx, col.type_info().name());
+        out.insert(key, value);
+    }
+    out
+}
+
+fn mysql_row_to_json(row: &MySqlRow) -> Map<String, Value> {
+    let mut out = Map::new();
+    for (idx, col) in row.columns().iter().enumerate() {
+        let key = snake_to_camel(col.name());
+        let value = mysql_column_value(row, idx, col.type_info().name());
         out.insert(key, value);
     }
     out
@@ -1462,6 +1628,228 @@ fn pg_column_value(row: &PgRow, idx: usize, ty: &str, kind: &PgTypeKind) -> Valu
     }
 }
 
+/// Decode one MySQL column into JSON.
+///
+/// MySQL type names from sqlx (via the server-side `COM_FIELD_LIST`
+/// payload) are upper-case tokens like `INT`, `BIGINT`, `TINYINT`,
+/// `DECIMAL`, `VARCHAR`, `TEXT`, `DATE`, `DATETIME`, `TIMESTAMP`,
+/// `JSON`, `ENUM`, `BLOB`. Width/signedness is baked into the name
+/// where it matters: `INT UNSIGNED`, `BIGINT UNSIGNED`, etc.
+///
+/// Semantic match with Postgres:
+///   - integers → JSON number (widened to i64 or stringified for u64
+///     overflow)
+///   - floats → JSON number
+///   - decimals → JSON string (never silently truncate precision)
+///   - booleans → MySQL has no native boolean; TINYINT(1) is the
+///     convention — surfaces as JSON number here, caller interprets
+///   - date/time → ISO 8601 string (same format as Postgres path)
+///   - JSON → unwrapped JSON value
+///   - BIT → JSON number (small widths) or hex string (large widths —
+///     we treat >64-bit widths as hex since no safe JSON encoding
+///     exists)
+///   - BLOB → UTF-8 string if valid, else null (same policy as
+///     SQLite's fallback)
+fn mysql_column_value(row: &MySqlRow, idx: usize, ty: &str) -> Value {
+    let ty_upper = ty.to_ascii_uppercase();
+    // NULL: short-circuit before type-specific decodes.
+    if let Ok(None) = row.try_get::<Option<String>, _>(idx) {
+        if ty_upper == "VARCHAR"
+            || ty_upper == "CHAR"
+            || ty_upper.starts_with("TEXT")
+            || ty_upper == "TINYTEXT"
+            || ty_upper == "MEDIUMTEXT"
+            || ty_upper == "LONGTEXT"
+            || ty_upper.starts_with("ENUM")
+        {
+            return Value::Null;
+        }
+    }
+    // Integer widths. sqlx picks the native Rust type by MySQL width;
+    // bind each in turn and widen for JSON.
+    //
+    // TINYINT vs BOOLEAN: sqlx-mysql's `MySqlTypeInfo::name()` reports
+    // `TINYINT(1)` columns as `"BOOLEAN"` (per MySQL's historical
+    // convention of using `TINYINT(1)` for booleans) and all other
+    // `TINYINT` widths as `"TINYINT"`. Decode strategy mirrors the
+    // split:
+    //   - plain `TINYINT` → `i8` (preserves sign and full -128..127 range).
+    //   - `TINYINT(1)` / `BOOLEAN` → `bool` → JSON number (0 / 1).
+    //     Decoding via `i8` would also work, but `bool` is the shape
+    //     sqlx advertises as compatible for this type-name and keeps
+    //     the semantic rule explicit: callers interpret 0/1 the way
+    //     MySQL ecosystems already do.
+    if ty_upper == "TINYINT" {
+        if let Ok(Some(v)) = row.try_get::<Option<i8>, _>(idx) {
+            return Value::Number(i64::from(v).into());
+        }
+    }
+    if ty_upper == "BOOLEAN" {
+        if let Ok(Some(v)) = row.try_get::<Option<bool>, _>(idx) {
+            return Value::Number((v as i64).into());
+        }
+    }
+    if ty_upper == "TINYINT UNSIGNED" {
+        if let Ok(Some(v)) = row.try_get::<Option<u8>, _>(idx) {
+            return Value::Number(i64::from(v).into());
+        }
+    }
+    if ty_upper == "SMALLINT" {
+        if let Ok(Some(v)) = row.try_get::<Option<i16>, _>(idx) {
+            return Value::Number(i64::from(v).into());
+        }
+    }
+    // YEAR is a 1-byte unsigned type in MySQL representing 1901-2155
+    // (plus special 0000). sqlx-mysql decodes it as `u16`, not `i16`;
+    // trying `i16` first fails on the Decode shape check and the
+    // column surfaces as Null. Try unsigned first; fall back to
+    // signed for driver versions that pick the other mapping.
+    if ty_upper == "YEAR" {
+        if let Ok(Some(v)) = row.try_get::<Option<u16>, _>(idx) {
+            return Value::Number(i64::from(v).into());
+        }
+        if let Ok(Some(v)) = row.try_get::<Option<i16>, _>(idx) {
+            return Value::Number(i64::from(v).into());
+        }
+    }
+    if ty_upper == "SMALLINT UNSIGNED" {
+        if let Ok(Some(v)) = row.try_get::<Option<u16>, _>(idx) {
+            return Value::Number(i64::from(v).into());
+        }
+    }
+    if ty_upper == "INT" || ty_upper == "MEDIUMINT" || ty_upper == "INTEGER" {
+        if let Ok(Some(v)) = row.try_get::<Option<i32>, _>(idx) {
+            return Value::Number(i64::from(v).into());
+        }
+    }
+    if ty_upper == "INT UNSIGNED" || ty_upper == "MEDIUMINT UNSIGNED" {
+        if let Ok(Some(v)) = row.try_get::<Option<u32>, _>(idx) {
+            return Value::Number(i64::from(v).into());
+        }
+    }
+    if ty_upper == "BIGINT" {
+        if let Ok(Some(v)) = row.try_get::<Option<i64>, _>(idx) {
+            return Value::Number(v.into());
+        }
+    }
+    if ty_upper == "BIGINT UNSIGNED" {
+        // u64 can exceed i64::MAX; serde_json::Number holds u64 natively.
+        if let Ok(Some(v)) = row.try_get::<Option<u64>, _>(idx) {
+            return Value::Number(v.into());
+        }
+    }
+    // Floating point.
+    if ty_upper == "FLOAT" {
+        if let Ok(Some(v)) = row.try_get::<Option<f32>, _>(idx) {
+            return serde_json::Number::from_f64(v as f64)
+                .map(Value::Number)
+                .unwrap_or(Value::Null);
+        }
+    }
+    if ty_upper == "DOUBLE" {
+        if let Ok(Some(v)) = row.try_get::<Option<f64>, _>(idx) {
+            return serde_json::Number::from_f64(v)
+                .map(Value::Number)
+                .unwrap_or(Value::Null);
+        }
+    }
+    // DECIMAL / NUMERIC: stringify to preserve precision (same policy
+    // as the Postgres path).
+    if ty_upper == "DECIMAL" || ty_upper == "NUMERIC" {
+        if let Ok(Some(v)) = row.try_get::<Option<sqlx::types::Decimal>, _>(idx) {
+            return Value::String(v.to_string());
+        }
+    }
+    // Dates and times. ISO 8601 with the `T` separator for date-times;
+    // naive forms match the Postgres path.
+    if ty_upper == "DATETIME" || ty_upper == "TIMESTAMP" {
+        if let Ok(Some(v)) = row.try_get::<Option<chrono::NaiveDateTime>, _>(idx) {
+            return Value::String(v.format("%Y-%m-%dT%H:%M:%S%.f").to_string());
+        }
+        if let Ok(Some(v)) = row.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>(idx) {
+            return Value::String(v.format("%Y-%m-%dT%H:%M:%S%.fZ").to_string());
+        }
+    }
+    if ty_upper == "DATE" {
+        if let Ok(Some(v)) = row.try_get::<Option<chrono::NaiveDate>, _>(idx) {
+            return Value::String(v.to_string());
+        }
+    }
+    if ty_upper == "TIME" {
+        if let Ok(Some(v)) = row.try_get::<Option<chrono::NaiveTime>, _>(idx) {
+            return Value::String(v.to_string());
+        }
+    }
+    // JSON column: unwrap sqlx's wrapper so the response holds the
+    // actual value, not a stringified copy.
+    if ty_upper == "JSON" {
+        if let Ok(Some(v)) = row.try_get::<Option<sqlx::types::Json<Value>>, _>(idx) {
+            return v.0;
+        }
+    }
+    // Char/text families and ENUM/SET all come back as String. ENUM is
+    // the member label; SET is a comma-separated list (MySQL's wire
+    // shape — splitting it would require schema knowledge).
+    if ty_upper == "VARCHAR"
+        || ty_upper == "CHAR"
+        || ty_upper == "TEXT"
+        || ty_upper == "TINYTEXT"
+        || ty_upper == "MEDIUMTEXT"
+        || ty_upper == "LONGTEXT"
+        || ty_upper == "ENUM"
+        || ty_upper == "SET"
+    {
+        if let Ok(Some(v)) = row.try_get::<Option<String>, _>(idx) {
+            return Value::String(v);
+        }
+    }
+    // Binary families. Try UTF-8 first so VARBINARY columns storing
+    // text come back readable; fall back to Null for truly binary
+    // payloads (same policy as the SQLite last-resort branch — a
+    // generic REST endpoint has no sensible way to surface raw
+    // bytes).
+    if ty_upper == "BINARY"
+        || ty_upper == "VARBINARY"
+        || ty_upper == "BLOB"
+        || ty_upper == "TINYBLOB"
+        || ty_upper == "MEDIUMBLOB"
+        || ty_upper == "LONGBLOB"
+    {
+        if let Ok(Some(v)) = row.try_get::<Option<Vec<u8>>, _>(idx) {
+            return match String::from_utf8(v) {
+                Ok(s) => Value::String(s),
+                Err(_) => Value::Null,
+            };
+        }
+    }
+    // BIT: sqlx maps BIT(1) → bool, wider BIT widths → Vec<u8>.
+    if ty_upper == "BIT" {
+        if let Ok(Some(v)) = row.try_get::<Option<bool>, _>(idx) {
+            return Value::Bool(v);
+        }
+        if let Ok(Some(v)) = row.try_get::<Option<Vec<u8>>, _>(idx) {
+            return Value::String(
+                v.iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<Vec<_>>()
+                    .join(""),
+            );
+        }
+    }
+    // Last-resort: null detect, then string.
+    if row
+        .try_get::<Option<String>, _>(idx)
+        .map(|v| v.is_none())
+        .unwrap_or(false)
+    {
+        return Value::Null;
+    }
+    match row.try_get::<Option<String>, _>(idx) {
+        Ok(Some(v)) => Value::String(v),
+        _ => Value::Null,
+    }
+}
+
 fn sqlite_column_value(row: &SqliteRow, idx: usize, ty: &str) -> Value {
     // SQLite is dynamically typed: expression columns often carry an empty
     // type name. Try type-informed extraction first, then fall back to
@@ -1633,6 +2021,38 @@ mod tests {
         let (sql, params) = rewrite_named_params("SELECT :a, :b", Dialect::Sqlite);
         assert_eq!(sql, "SELECT ?1, ?2");
         assert_eq!(params, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn rewrite_mysql_placeholders_are_positional_anonymous() {
+        // MySQL `?` carries no index; the bind side relies on emission
+        // order and the names vector must mirror that order 1:1.
+        let (sql, params) = rewrite_named_params("SELECT :a, :b", Dialect::MySql);
+        assert_eq!(sql, "SELECT ?, ?");
+        assert_eq!(params, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn rewrite_mysql_repeated_param_binds_each_occurrence() {
+        // Postgres `$1, $1, $2` reuses one slot. MySQL has no indexed
+        // slot — every `?` is distinct wire-side, so a repeated
+        // `:name` must appear in `names` once per emission so the
+        // bind walker binds the value the right number of times.
+        let (sql, params) = rewrite_named_params("SELECT :x, :x, :y", Dialect::MySql);
+        assert_eq!(sql, "SELECT ?, ?, ?");
+        assert_eq!(params, vec!["x", "x", "y"]);
+    }
+
+    #[test]
+    fn rewrite_mysql_skips_string_literals_and_comments() {
+        // Same quoting/comment rules as the other dialects. Regression
+        // guard — easy to drift the three arms apart on a refactor.
+        let (sql, params) = rewrite_named_params(
+            "-- :fake\n/* :also_fake */ SELECT ':not_a_param', :real",
+            Dialect::MySql,
+        );
+        assert_eq!(sql, "-- :fake\n/* :also_fake */ SELECT ':not_a_param', ?");
+        assert_eq!(params, vec!["real"]);
     }
 
     /// Build a permissive declaration for a set of named params, all

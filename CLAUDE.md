@@ -13,7 +13,7 @@ SQL-files-as-REST-endpoints microservice. A directory tree of `.sql`
 files under `sql/<project>/<GET|POST>/<name>.sql` becomes an HTTP API
 at `<METHOD> /<project>/<name>`. Interface-compatible Rust rewrite of
 the [Bürokratt Resql](https://github.com/buerokratt/Resql) Spring Boot
-service. Axum 0.7 + Tokio + sqlx (Postgres/SQLite).
+service. Axum 0.7 + Tokio + sqlx (Postgres / SQLite / MySQL + MariaDB).
 
 Entry points worth knowing:
 - `src/server.rs` — router + middleware chain, request handlers.
@@ -414,6 +414,54 @@ else:
 PY
 ```
 
+## MySQL / MariaDB backend (post-0.4.3-alpha, [Unreleased])
+
+**Full LLM-oriented reference**:
+[`book/src/mysql-setup.md`](./book/src/mysql-setup.md) — Postgres →
+MySQL cheat sheet, array-as-JSON contract, type map, local dev
+recipe, LLM authoring checklist. Read it before authoring a `.sql`
+file for a MySQL datasource.
+
+### Code-side rules (decision table)
+
+| When you… | …do this |
+|---|---|
+| Add a new URL scheme or touch `connect()` | Keep the error message enumerating all five prefixes: `postgres://`, `postgresql://`, `mysql://`, `mariadb://`, `sqlite:` |
+| Add a `match` on `Pool` or `Dialect` | Three arms are mandatory: `Postgres`, `Sqlite`, `MySql`. The compiler enforces exhaustiveness. |
+| Add a new `Dialect` behaviour | Follow the two-group split: `Postgres | Sqlite` share indexed placeholders (`$N` / `?N`); `MySql` emits anonymous `?` and pushes `name` once per occurrence. See `rewrite_named_params` and tests `rewrite_mysql_*`. |
+| Add a MySQL binding path | Mirror `bind_pg`'s discipline — the **declared** `ParamType` drives the wire type, not the JSON shape. `type: array` → JSON string; semantic scalar types (`uuid`, `date`, `datetime`) → string. |
+| Add a new MySQL column type to the row mapper | Edit `mysql_column_value` in `src/query.rs`. Keep the order deterministic (null detect first, then integer widths signed-then-unsigned, then floats, then DECIMAL, then dates/times, then strings/enum/set, then JSON/BIT/binary, then fallback). Update the type map in [`book/src/mysql-setup.md`](./book/src/mysql-setup.md#row--json-type-map). |
+| Add a MySQL-only integration test | Gate it with `require_mysql!()`. The suite is self-bootstrapping — `bootstrap_schema()` drops + re-creates every table on each test, so it's safe to add new tables there without a Liquibase changelog. |
+
+### Multi-statement limitation (MySQL-only)
+
+MySQL prepared statements can only hold ONE statement. A `.sql`
+file with `INSERT …; SELECT …;` on MySQL returns 400
+`BadSqlGrammarException`. Postgres accepts multi-statement SQL via
+the extended-query protocol; the same `-- @transactional` recipe is
+not portable. INSERT-then-return-row on MySQL = two separate
+endpoints. The `-- @transactional` marker is still valid on a
+single-statement MySQL file (useful for trigger-chain atomicity).
+
+### Server-side timeout caveat
+
+`SET SESSION MAX_EXECUTION_TIME = <ms>` is **SELECT-only** and
+**hint-shaped** on MySQL. The HTTP-level `TimeoutLayer` is still the
+authoritative wall-clock cap; the server-side knob is defence in
+depth. Do not treat it as a hard kill like Postgres
+`statement_timeout`.
+
+### Compat posture
+
+- `/datasources` reports `com.mysql.cj.jdbc.Driver` for both
+  `mysql://` and `mariadb://` schemes (MySQL Connector/J speaks
+  MariaDB; the field is a display label).
+- CI uses a `mysql:8.0` service container with `TEST_MYSQL_URL`
+  exported. Local devs run the suite by pointing the env var at any
+  reachable MySQL.
+- **BREAKING** only for configs/alerts that grepped the old
+  unsupported-scheme reject message. HTTP wire shape unchanged.
+
 ## Fastest way to audit a live config
 
 ```bash
@@ -509,6 +557,19 @@ datasources:
     url:          "postgres://audit-db.internal:5432/audit"
     username:     "resql_audit"
     password_env: "RESQL_AUDIT_PASSWORD"
+
+  # MySQL / MariaDB datasources are first-class alongside Postgres.
+  # Use `mysql://` or `mariadb://` as the URL scheme. The `.sql` files
+  # for this project are authored in MySQL dialect — no per-DSL
+  # translation layer exists (see DIVERGENCES.md DIV-023).
+  #
+  # Array params bind as JSON strings on MySQL; author SQL uses
+  # `JSON_CONTAINS(:ids, CAST(id AS JSON))` or
+  # `id MEMBER OF(:ids)` (MySQL 8.0.17+) instead of `= ANY(:ids)`.
+  # - name: analytics
+  #   url:          "mysql://analytics-db.internal:3306/analytics"
+  #   username:     "resql_analytics"
+  #   password_env: "RESQL_ANALYTICS_PASSWORD"
 
 # ─── CORS ────────────────────────────────────────────────────────────────────
 # Default is empty → no CORS layer at all → browsers refuse cross-origin
@@ -656,7 +717,7 @@ Standard Rust workflow. Before touching code:
 |---|---|
 | Full breaking-change bullets + release notes | `CHANGELOG.md` |
 | Domain design (what Resql is/isn't) | `docs/DESIGN.md` |
-| Divergence-from-Java catalog (DIV-001..DIV-022) | `DIVERGENCES.md` |
+| Divergence-from-Java catalog (DIV-001..DIV-023) | `DIVERGENCES.md` |
 | Project rules (test hygiene, commit style, etc.) | `STANDARDS.md` |
 | Cross-project ruleset | `../DEV-REQUIREMENTS.md` |
 | h2ck.me audit trail (PR reviews, break-the-fix probes) | https://github.com/h2ckme/Resql-on-Rust |

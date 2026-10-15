@@ -37,14 +37,14 @@ is rejected — typos fail startup instead of silently ignoring config.
 |---|---|---|---|
 | `bind` | string | `0.0.0.0:8080` | Listener address. |
 | `max_body_bytes` | integer | `1048576` (1 MiB) | Inbound JSON body cap. Overflow → HTTP 413 in the header-envelope shape. |
-| `request_timeout_seconds` | integer | `30` | Per-request wall-clock cap. 0 refused at boot; overflow → HTTP 504. Postgres pools also `SET statement_timeout` to this value. |
+| `request_timeout_seconds` | integer | `30` | Per-request wall-clock cap. 0 refused at boot; overflow → HTTP 504. Postgres pools also `SET statement_timeout` to this value; MySQL pools `SET SESSION MAX_EXECUTION_TIME` (SELECT-only, hint-shaped — middleware is still the authoritative cap). |
 
 ## `datasources` (list of)
 
 | Field | Type | Default | Purpose |
 |---|---|---|---|
 | `name` | string | *(required)* | Unique label. Referenced from URL project or `X-Datasource` header. |
-| `url` | string | *(required)* | Connection URL. Supported schemes: `postgres://`, `postgresql://`, `sqlite:`. |
+| `url` | string | *(required)* | Connection URL. Supported schemes: `postgres://`, `postgresql://`, `mysql://`, `mariadb://`, `sqlite:`. |
 | `username` | string | `""` | Username to inject in the URL userinfo. Overrides any `user:` already in the URL — the config-supplied value wins (see [issue #27](https://github.com/turnerrainer/Resql/issues/27)). |
 | `password_env` | string | `""` | Env-var **name** holding the password. **Never store passwords in this file.** |
 | `password` | string | `null` | Java-compat plaintext form. If set, compat-shim emits WARN every time. Rejected if `password_env` is also set. |
@@ -310,3 +310,23 @@ resql -c /app/resql.yaml
 
 Every request except `/health` / `/healthz` must now carry
 `Authorization: Bearer $RESQL_INTER_SERVICE_TOKEN`.
+
+## MySQL / MariaDB backend
+
+MySQL and MariaDB are first-class alongside Postgres. Use `mysql://`
+or `mariadb://` as the datasource URL scheme.
+
+```yaml
+datasources:
+  - name: analytics
+    url:          "mysql://analytics-db.internal:3306/analytics"
+    username:     "resql_analytics"
+    password_env: "RESQL_ANALYTICS_PASSWORD"
+```
+
+**The authoritative reference lives on its own page**:
+[MySQL / MariaDB backend](./mysql-setup.md) — includes the Postgres →
+MySQL dialect cheat sheet, the array-as-JSON contract, the full row →
+JSON type map, the `MAX_EXECUTION_TIME` timeout caveat, local
+development recipe, and an LLM authoring checklist. Read that page
+before writing any `.sql` file for a MySQL datasource.

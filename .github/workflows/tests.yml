@@ -34,8 +34,29 @@ jobs:
           --health-interval=5s
           --health-timeout=5s
           --health-retries=20
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: cipw
+          MYSQL_DATABASE: resql_test
+          MYSQL_USER: resql
+          MYSQL_PASSWORD: cipw
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h localhost -u root -pcipw --silent"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=30
     env:
       TEST_POSTGRES_URL: "postgres://postgres:cipw@localhost:5432/resql_test"
+      # MySQL integration suite drops/creates its own tables on every
+      # test (see tests/integration_mysql.rs::bootstrap_schema), so the
+      # user needs CREATE/DROP privileges on the schema. The sidecar's
+      # `MYSQL_USER` only has rights on its own database, so we point
+      # the test URL at root — this is CI-only; production never uses
+      # root credentials.
+      TEST_MYSQL_URL: "mysql://root:cipw@localhost:3306/resql_test"
     steps:
       - uses: actions/checkout@v5
 

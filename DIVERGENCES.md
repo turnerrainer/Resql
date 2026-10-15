@@ -412,3 +412,46 @@ require re-architecture.
   text still lives in the server log for the request's trace id.
 - **Reversibility.** low (surface change in one place —
   `IntoResponse for ResqlError` in `src/error.rs`).
+
+## DIV-023 — MySQL / MariaDB backend; array params bind as JSON
+
+- **Field / behaviour.** Datasource URL schemes accepted at
+  `connect()`; wire-side binding of a `type: array` parameter when the
+  pool is MySQL / MariaDB.
+- **Source of truth.** Java Resql supports Postgres (and, via the
+  Spring driver surface, SQL Server); it has never shipped MySQL.
+- **Target behaviour.** Rust accepts `mysql://` and `mariadb://` URLs
+  as first-class datasources (`Pool::MySql`, dialect `MySql`). The
+  `:name → ?` rewriter emits positional-anonymous `?` placeholders; a
+  repeated `:name` binds the value at every occurrence (unlike
+  Postgres `$N` / SQLite `?N` which reuse one slot).
+
+  **Array params bind as JSON strings.** MySQL has no native array
+  type. The author's SQL must use JSON predicates:
+  - `WHERE JSON_CONTAINS(:ids, CAST(id AS JSON))`
+  - `JOIN JSON_TABLE(:ids, '$[*]' COLUMNS (id INT PATH '$')) jt`
+  - `WHERE id MEMBER OF(:ids)` (MySQL 8.0.17+)
+
+  The declaration still uses `type: array` with an `items:` block;
+  `validate_params` and `coerce_array_items` enforce element-level
+  type conformance exactly as on Postgres. The DIFFERENCE is purely
+  on the SQL side — same declaration, different predicate.
+- **Motivation.** Postgres and MySQL have incompatible dialects for
+  almost every non-trivial operation (`ANY(array)` vs. JSON
+  predicates, `ON CONFLICT` vs. `ON DUPLICATE KEY UPDATE`, `RETURNING`
+  vs. `LAST_INSERT_ID()`, `::` casts vs. `CAST(… AS …)`, `ILIKE` vs.
+  collation-dependent `LIKE`, …). Writing a universal-SQL shim would
+  be a product-sized undertaking with its own bug surface and a poor
+  failure mode (opaque translation errors at 2am). The explicit
+  contract — each `.sql` file is authored in its target backend's
+  dialect — matches how MySQL ecosystems already write queries and
+  keeps the bind layer honest.
+- **Migration.** New feature; no existing deployments are affected.
+  Operators adding MySQL datasources write `.sql` files in MySQL
+  dialect; Postgres datasources keep Postgres SQL. The same Resql
+  instance can serve both — datasource name on the request chooses
+  the pool.
+- **Reversibility.** high at the config level (dropping MySQL from
+  `sqlx` features and removing `Pool::MySql` + `Dialect::MySql`
+  reverts the surface); every `.sql` file written for MySQL stays
+  MySQL — reversal is "lose the backend," not "rewrite SQL."

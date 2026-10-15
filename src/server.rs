@@ -685,6 +685,12 @@ async fn list_datasources(State(state): State<AppState>) -> Response {
         let driver_class_name = match state.registry.get(&name) {
             Some(crate::db::Pool::Postgres(_)) => "org.postgresql.Driver",
             Some(crate::db::Pool::Sqlite(_)) => "org.sqlite.JDBC",
+            // Both mysql:// and mariadb:// URLs land in Pool::MySql and
+            // speak the MySQL wire protocol. The Java-compat driver
+            // class we report is the official MySQL Connector/J name;
+            // Spring configs that want the MariaDB JDBC class can
+            // ignore this field (the UI uses it for display only).
+            Some(crate::db::Pool::MySql(_)) => "com.mysql.cj.jdbc.Driver",
             None => "",
         };
         let jdbc_url = ds_cfg.map(|d| redact_url(&d.url)).unwrap_or_default();
@@ -977,6 +983,21 @@ mod tests {
         // deployment topology) is not disclosed.
         assert_eq!(redact_url("sqlite::memory:"), "sqlite:");
         assert_eq!(redact_url("sqlite:/var/lib/resql/audit.db"), "sqlite:");
+    }
+
+    #[test]
+    fn redact_url_handles_mysql_and_mariadb_urls() {
+        // Same guarantee as Postgres: strip userinfo, path, and query.
+        // Guard the MySQL/MariaDB schemes against future redact
+        // changes that might only recognise the two older schemes.
+        assert_eq!(
+            redact_url("mysql://resql:supersecret@db.internal:3306/app?charset=utf8"),
+            "mysql://db.internal:3306"
+        );
+        assert_eq!(
+            redact_url("mariadb://admin:p@maria.corp:3306/users"),
+            "mariadb://maria.corp:3306"
+        );
     }
 
     // All server tests below bind to loopback to satisfy fleet §3.1's
