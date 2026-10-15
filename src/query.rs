@@ -1668,22 +1668,25 @@ fn mysql_column_value(row: &MySqlRow, idx: usize, ty: &str) -> Value {
     // Integer widths. sqlx picks the native Rust type by MySQL width;
     // bind each in turn and widen for JSON.
     //
-    // TINYINT needs special handling: MySQL has no native boolean,
-    // but `TINYINT(1)` is the convention — sqlx-mysql reports the
-    // type as `"TINYINT"` and the column metadata flags it as
-    // bool-shaped. sqlx's `Decode<i8>` fails on a bool-shaped column
-    // (the max_length check gates it), returning Err — so a plain
-    // `try_get::<Option<i8>>` yields Null for `TINYINT(1)` columns.
-    // Try bool first (succeeds on `TINYINT(1)`), then i8 (succeeds on
-    // non-1-width `TINYINT`). Either way surface as JSON number so
-    // the caller interprets 0/1 the way the MySQL ecosystem already
-    // does. "BOOLEAN" is a MySQL alias for TINYINT(1); fold it here.
-    if ty_upper == "TINYINT" || ty_upper == "BOOLEAN" {
-        if let Ok(Some(v)) = row.try_get::<Option<bool>, _>(idx) {
-            return Value::Number((v as i64).into());
-        }
+    // TINYINT vs BOOLEAN: sqlx-mysql's `MySqlTypeInfo::name()` reports
+    // `TINYINT(1)` columns as `"BOOLEAN"` (per MySQL's historical
+    // convention of using `TINYINT(1)` for booleans) and all other
+    // `TINYINT` widths as `"TINYINT"`. Decode strategy mirrors the
+    // split:
+    //   - plain `TINYINT` → `i8` (preserves sign and full -128..127 range).
+    //   - `TINYINT(1)` / `BOOLEAN` → `bool` → JSON number (0 / 1).
+    //     Decoding via `i8` would also work, but `bool` is the shape
+    //     sqlx advertises as compatible for this type-name and keeps
+    //     the semantic rule explicit: callers interpret 0/1 the way
+    //     MySQL ecosystems already do.
+    if ty_upper == "TINYINT" {
         if let Ok(Some(v)) = row.try_get::<Option<i8>, _>(idx) {
             return Value::Number(i64::from(v).into());
+        }
+    }
+    if ty_upper == "BOOLEAN" {
+        if let Ok(Some(v)) = row.try_get::<Option<bool>, _>(idx) {
+            return Value::Number((v as i64).into());
         }
     }
     if ty_upper == "TINYINT UNSIGNED" {
