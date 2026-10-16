@@ -6,6 +6,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **MariaDB datasources failed to connect under 0.5.0-alpha.** The
+  server-side timeout hook unconditionally sent `SET SESSION
+  MAX_EXECUTION_TIME = <ms>`, which only exists in MySQL 5.7.8+.
+  On MariaDB (any version) and on older MySQL (<5.7.8), the server
+  returns error 1193 "Unknown system variable" and every pool
+  connect fails — the datasource was unusable. Fix: detect the
+  server variant at connect time via `SELECT VERSION()` and pick
+  the right variable:
+    - **MySQL 5.7.8+**: `SET SESSION MAX_EXECUTION_TIME = <ms>`
+      (milliseconds, SELECT-only, hint-shaped).
+    - **MariaDB 10.1.1+**: `SET SESSION max_statement_time = <seconds>`
+      (seconds, applies to all statements).
+    - **Older servers**: no equivalent variable exists; log a WARN
+      at connect and let the pool come up. The middleware
+      `TimeoutLayer` remains the authoritative wall-clock cap.
+
+  The MariaDB `"5.5.5-"` legacy-compat version prefix (some
+  distributions still return `"5.5.5-10.11.6-MariaDB"` for
+  backwards compat with ancient MySQL clients) is handled — the
+  version parser strips it before the semver check so a modern
+  MariaDB 10.11 isn't misdetected as MySQL 5.5. Reported during
+  rollout against an Aviation-service MariaDB.
+
 ## [0.5.0-alpha] - 2026-10-15
 
 **First-class MySQL / MariaDB backend.** Minor-version bump —

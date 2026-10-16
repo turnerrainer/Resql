@@ -251,29 +251,50 @@ For plain single-row INSERT/UPDATE/DELETE on InnoDB, the marker is
 a no-op — InnoDB wraps each statement in an implicit transaction
 anyway.
 
-## Timeout caveat — `MAX_EXECUTION_TIME` is a hint
+## Timeout caveat — different variable on MySQL vs. MariaDB
 
-When `server.request_timeout_seconds > 0`, Resql applies
+When `server.request_timeout_seconds > 0`, Resql applies a
+server-side query timeout in every pool connection's
+`after_connect` hook. The variable name AND units differ between
+MySQL and MariaDB — Resql detects the server at connect time
+(`SELECT VERSION()`) and emits the right one:
 
-```sql
-SET SESSION MAX_EXECUTION_TIME = <ms>
-```
+| Server | Statement issued | Units | Available since |
+|---|---|---|---|
+| MySQL | `SET SESSION MAX_EXECUTION_TIME = <ms>` | milliseconds (INT) | 5.7.8 (2015) — SELECT-only, hint-shaped |
+| MariaDB | `SET SESSION max_statement_time = <seconds>` | seconds (DOUBLE) | 10.1.1 (2015) — applies to all statements |
 
-in every MySQL pool connection's `after_connect` hook. Two important
-semantic differences from Postgres `statement_timeout`:
+Older servers (MySQL <5.7.8 or MariaDB <10.1) have no equivalent —
+Resql emits a WARN at connect naming the server version and lets
+the pool come up. The HTTP-level `TimeoutLayer` remains the
+authoritative wall-clock cap in every case; the server-side knob
+is defence in depth.
 
-1. **SELECT-only.** MySQL ignores `MAX_EXECUTION_TIME` for anything
-   that isn't a pure SELECT — INSERT / UPDATE / DELETE / DDL will
-   not be killed by it. The middleware `TimeoutLayer` is still the
-   authoritative wall-clock cap on the HTTP side; MySQL's hint is
-   defence in depth, not a hard kill.
-2. **Hint-shaped.** The optimizer may still finish past the budget on
-   specific plans. Treat it as "likely to kill a runaway SELECT,"
-   not "guaranteed."
+### Why two different variables?
+
+MariaDB forked MySQL in 2009 and shipped its own statement-timeout
+implementation (`max_statement_time`) in 10.1.1 (October 2015).
+MySQL added its own version (`MAX_EXECUTION_TIME`) three months
+later in 5.7.8 (September 2015) with different semantics (SELECT-only
+hint vs. hard kill) and different units (ms vs. seconds). The two
+variables are intentionally incompatible — sending the MySQL
+variable to a MariaDB server returns error 1193 (`Unknown system
+variable 'MAX_EXECUTION_TIME'`) and the entire pool refuses to open.
+
+### Important semantic differences from Postgres `statement_timeout`
+
+1. **MySQL is SELECT-only.** `MAX_EXECUTION_TIME` ignores INSERT /
+   UPDATE / DELETE / DDL. MariaDB's `max_statement_time` applies to
+   all statements, so it's actually closer in spirit to Postgres's
+   knob.
+2. **MySQL is hint-shaped.** The optimizer may still finish past
+   the budget on specific plans. Treat it as "likely to kill a
+   runaway SELECT," not "guaranteed."
 
 Companion knob the DBA may want to set on the server:
 `innodb_lock_wait_timeout` (controls how long a transaction waits for
-row locks). Resql does not touch it — leave it to your MySQL config.
+row locks). Resql does not touch it — leave it to your MySQL / MariaDB
+config.
 
 ## Row → JSON type map
 
