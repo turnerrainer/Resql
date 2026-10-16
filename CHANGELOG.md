@@ -6,6 +6,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1-alpha] - 2026-10-16
+
+**MariaDB datasource hotfix.** Patch-version bump — fixes a
+critical regression in 0.5.0-alpha where every MariaDB (and
+pre-5.7.8 MySQL) pool connect failed with error 1193 "Unknown
+system variable". Operators running MariaDB on 0.5.0-alpha should
+upgrade immediately. No action needed on existing Postgres /
+SQLite / MySQL 5.7.8+ deployments.
+
 ### Fixed
 
 - **MariaDB datasources failed to connect under 0.5.0-alpha.** The
@@ -709,7 +718,8 @@ Spring Boot service. Interface-compatible with the original for the SQL-file-to-
 - Container image signed with cosign keyless via GHA OIDC.
 - Trivy HIGH/CRITICAL scan gates image signing.
 
-[Unreleased]: https://github.com/turnerrainer/Resql/compare/v0.5.0-alpha...HEAD
+[Unreleased]: https://github.com/turnerrainer/Resql/compare/v0.5.1-alpha...HEAD
+[0.5.1-alpha]: https://github.com/turnerrainer/Resql/releases/tag/v0.5.1-alpha
 [0.5.0-alpha]: https://github.com/turnerrainer/Resql/releases/tag/v0.5.0-alpha
 [0.4.3-alpha]: https://github.com/turnerrainer/Resql/releases/tag/v0.4.3-alpha
 [0.4.2-alpha]: https://github.com/turnerrainer/Resql/releases/tag/v0.4.2-alpha

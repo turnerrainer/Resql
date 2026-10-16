@@ -10,7 +10,7 @@ authored in its target backend's dialect; there is no cross-dialect
 translation layer. See [MySQL / MariaDB
 backend](./book/src/mysql-setup.md) when adding a MySQL datasource.
 
-**Latest published:** 0.5.0-alpha (`docker.io/turnerrainer/resql:0.5.0-alpha`, also `ghcr.io/turnerrainer/resql:0.5.0-alpha`, cosign-signed) — adds first-class MySQL / MariaDB backend alongside Postgres and SQLite. Minor version bump: additive, backward-compatible. See [MySQL / MariaDB backend](./book/src/mysql-setup.md) for the dialect contract. Earlier breaking changes from the 0.4.x line are still relevant to any upgrade from pre-0.4.0 — see [Upgrading to 0.4.0-alpha](#upgrading-to-040-alpha).
+**Latest published:** 0.5.1-alpha (`docker.io/turnerrainer/resql:0.5.1-alpha`, also `ghcr.io/turnerrainer/resql:0.5.1-alpha`, cosign-signed) — MariaDB hotfix for the MySQL backend added in 0.5.0-alpha; sends `max_statement_time` instead of `MAX_EXECUTION_TIME` on MariaDB datasources (otherwise every pool connect fails with error 1193). Operators running 0.5.0-alpha against MariaDB should upgrade immediately. Earlier breaking changes from the 0.4.x line are still relevant to any upgrade from pre-0.4.0 — see [Upgrading to 0.4.0-alpha](#upgrading-to-040-alpha).
 **License:** [Apache-2.0](./LICENSE)
 
 ## One-command demo
@@ -19,7 +19,7 @@ The shipped image wires **two** SQLite datasources (`users` and `audit`)
 so multi-database routing works out of the box.
 
 ```bash
-docker run --rm -p 8080:8080 turnerrainer/resql:0.5.0-alpha
+docker run --rm -p 8080:8080 turnerrainer/resql:0.5.1-alpha
 curl "http://localhost:8080/users/hello?name=world"
 # [{"greeting":"hello from users db, world!"}]
 curl "http://localhost:8080/audit/tail?n=42"
