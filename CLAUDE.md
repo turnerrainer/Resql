@@ -445,11 +445,24 @@ single-statement MySQL file (useful for trigger-chain atomicity).
 
 ### Server-side timeout caveat
 
-`SET SESSION MAX_EXECUTION_TIME = <ms>` is **SELECT-only** and
-**hint-shaped** on MySQL. The HTTP-level `TimeoutLayer` is still the
-authoritative wall-clock cap; the server-side knob is defence in
-depth. Do not treat it as a hard kill like Postgres
-`statement_timeout`.
+The variable name AND units differ between MySQL and MariaDB — we
+detect the server variant at connect time via `SELECT VERSION()`:
+
+| Server | Variable | Units | Supported since |
+|---|---|---|---|
+| MySQL | `MAX_EXECUTION_TIME` | milliseconds (INT) | 5.7.8 (2015) — SELECT-only, hint-shaped |
+| MariaDB | `max_statement_time` | seconds (DOUBLE) | 10.1.1 (2015) — applies to all statements |
+
+Hardcoding either one would blow up the other with error 1193
+"Unknown system variable" and kill every pool connect. The pure
+helper `mysql_timeout_sql(version, ms)` in `src/db.rs` picks the
+right statement by substring-matching "mariadb" (case-insensitive)
+in VERSION() and emits either variable with correct units. Older
+servers (MySQL <5.7.8, MariaDB <10.1) have no equivalent — we
+WARN at connect and let the pool come up. The HTTP-level
+`TimeoutLayer` is still the authoritative wall-clock cap; the
+server-side knob is defence in depth. Do not treat it as a hard
+kill like Postgres `statement_timeout`.
 
 ### Compat posture
 
