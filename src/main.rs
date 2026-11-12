@@ -119,7 +119,7 @@ async fn run_serve(config: Option<&PathBuf>) -> Result<()> {
     let cfg = Config::from_path(&config_path)
         .with_context(|| format!("loading config from {}", config_path.display()))?;
 
-    init_tracing(&cfg.logging.level, &cfg.logging.format);
+    let tracer_provider = init_tracing(&cfg.logging.level, &cfg.logging.format);
 
     // Boot-time diagnostic pass (REFACTO-REQUIREMENTS §6.2): every Java-shape
     // field the compat shim recognised is announced here so the operator can
@@ -188,6 +188,10 @@ async fn run_serve(config: Option<&PathBuf>) -> Result<()> {
     // sessions).
     state.registry.close_all().await;
     info!("bye");
+    // Flush spans still queued in the batch exporter, bounded so a hung
+    // collector cannot outlast the container's stop grace period (no-op
+    // when export is off).
+    resql::observability::shutdown(tracer_provider).await;
     Ok(())
 }
 
@@ -248,6 +252,23 @@ fn doctor(config: Option<&PathBuf>, strict: bool) -> ExitCode {
         }
     }
 
+    // OTLP trace export is configured through the standard OTEL_* variables,
+    // not the config file; surface it here so a deployment can be vetted
+    // end to end. Nothing is contacted.
+    if let Some(export) = resql::observability::export_status_from_env() {
+        println!(
+            "INFO: [otel] OTLP trace export enabled: endpoint={} protocol={} service.name={} export_timeout_ms={}",
+            export.endpoint,
+            export.transport.as_str(),
+            export.service_name,
+            export.timeout.as_millis()
+        );
+        for warning in &export.warnings {
+            warnings += 1;
+            println!("WARN: [otel] {warning}");
+        }
+    }
+
     println!("\ndoctor summary: {warnings} warning(s), errors: 0. strict={strict}",);
     if warnings > 0 && strict {
         // Exit 2 (distinct from "hard error" 1) so CI can distinguish
@@ -259,7 +280,10 @@ fn doctor(config: Option<&PathBuf>, strict: bool) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-fn init_tracing(level: &str, format: &str) {
+/// Install the global subscriber. Returns the OTLP tracer provider when
+/// `OTEL_EXPORTER_OTLP_ENDPOINT` enables trace export (see
+/// `resql::observability`); the caller shuts it down on exit.
+fn init_tracing(level: &str, format: &str) -> Option<opentelemetry_sdk::trace::TracerProvider> {
     // RESQL_LOG env overrides YAML level; RESQL_LOG_FORMAT overrides
     // YAML format so an operator can flip a running container's log
     // shape (text ↔ json) without editing the config file.
@@ -271,22 +295,24 @@ fn init_tracing(level: &str, format: &str) {
         .map(|s| s.to_ascii_lowercase())
         .unwrap_or_else(|| format.to_ascii_lowercase());
 
-    use tracing_subscriber::layer::SubscriberExt;
-    use tracing_subscriber::util::SubscriberInitExt;
-
-    let base = tracing_subscriber::registry().with(filter);
-    match effective_format.as_str() {
-        "json" => base
-            .with(
-                tracing_subscriber::fmt::layer()
-                    .json()
-                    .with_current_span(true)
-                    .with_span_list(false),
-            )
-            .try_init()
-            .ok(),
-        _ => base.with(tracing_subscriber::fmt::layer()).try_init().ok(),
+    // `Ok(None)` when export is off; an exporter that cannot be built is
+    // reported below, once the subscriber exists, and the service runs on
+    // with local logging only.
+    let (provider, init_error) = match resql::observability::init_provider_from_env() {
+        Ok(p) => (p, None),
+        Err(e) => (None, Some(e)),
     };
+    // The log filter applies to the log layer only: what is logged never
+    // decides what is exported (see `observability::build_dispatch`).
+    let dispatch = resql::observability::build_dispatch(
+        filter,
+        &effective_format,
+        std::io::stdout,
+        provider.as_ref(),
+    );
+    let _ = tracing::dispatcher::set_global_default(dispatch);
+    resql::observability::log_export_status(provider.is_some(), init_error.as_deref());
+    provider
 }
 
 /// Container-native health check. Point `HEALTHCHECK CMD ["/app/resql",

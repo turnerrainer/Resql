@@ -6,6 +6,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Optional OTLP trace export.** Off unless
+  `OTEL_EXPORTER_OTLP_ENDPOINT` is set; with it unset, behaviour and log
+  output are unchanged. Works with any OpenTelemetry collector or
+  OTLP-compatible backend.
+  - Transport: OTLP/gRPC (default, plaintext) or OTLP/HTTP protobuf
+    (`OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf`, supports `https://`).
+    `OTEL_EXPORTER_OTLP_HEADERS`, `OTEL_EXPORTER_OTLP_TIMEOUT`,
+    `OTEL_SERVICE_NAME` (default `resql`) and `OTEL_RESOURCE_ATTRIBUTES`
+    are honoured.
+  - Request span (kind `SERVER`) parented on the inbound W3C
+    `traceparent`; the `traceparent` returned downstream carries Resql's
+    own span id under the same trace id. `http.route` (and the span name)
+    is the saved-query path or a route template, never the raw request
+    path. 5xx marks the span as an error; 4xx does not. `/health` and
+    `/healthz` produce no spans. Log lines inside the request also carry
+    `span_id`.
+  - Query span (kind `CLIENT`) per saved-query execution with
+    `db.system`, `db.namespace` (datasource), `db.operation.name`,
+    `resql.query`, `resql.rows`, `db.operation.batch.size` and
+    `error.type` (the `X-Resql-Error-Code` value).
+  - Never exported: SQL text, bind parameters, bodies, header values,
+    query strings and log events.
+  - Collector unreachable: requests are unaffected; failed exports are
+    logged at `ERROR` (target `opentelemetry_sdk`, header values never
+    included).
+  - Export is independent of the log level: `RESQL_LOG=warn` still
+    exports every span.
+  - Each export request is bounded by `OTEL_EXPORTER_OTLP_TIMEOUT` /
+    `OTEL_EXPORTER_OTLP_TRACES_TIMEOUT` (default 10 s, both transports),
+    and the flush on SIGTERM by 5 s, so a hung collector cannot outlast
+    the 10 s `docker stop` grace period.
+  - Boot logs one `INFO` line when export is on, and a `WARN` for an
+    `https://` endpoint over gRPC, exporter headers sent in plaintext to a
+    non-loopback collector, or an unusable protocol / timeout value.
+    `resql doctor` reports the same (`[otel]`, counted by `--strict`).
+  - An endpoint carrying credentials (`user:pass@`, `?query`, `#fragment`)
+    is refused and export stays off: exporter errors repeat the endpoint.
+  - Sampling: standard `OTEL_TRACES_SAMPLER` / `OTEL_TRACES_SAMPLER_ARG`.
+  - With export on, the response `traceparent` carries Resql's own span id
+    (`DIVERGENCES.md` DIV-024).
+  - See `book/src/logging.md`, "Trace export (OTLP)". Closes task 004.
+
 ## [0.5.1-alpha] - 2026-10-16
 
 **MariaDB datasource hotfix.** Patch-version bump — fixes a
