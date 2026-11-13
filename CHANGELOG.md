@@ -6,6 +6,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **Daily `security` workflow was red** (`cargo audit --deny warnings`
+  and `cargo deny check all`). Three new advisories, all handled:
+    - **RUSTSEC-2026-0386** (tokio `AsyncFd::new` I/O-safety, unsound):
+      lockfile bump tokio 1.53.1 → 1.54.1. Resql does not call
+      `AsyncFd`; fixed anyway.
+    - **RUSTSEC-2026-0486** (rustix xattr zero-length buffer, unsound):
+      lockfile bump rustix 1.1.4 → 1.1.6. Dev-dependency only
+      (`tempfile`, tests); not in the shipped binary.
+    - **RUSTSEC-2026-0459** (SQLite < 3.54.0 via `libsqlite3-sys`,
+      CVE-2026-119375): **ignored with documented rationale, not
+      fixed.** No sqlx release can resolve `libsqlite3-sys >= 0.39.0`
+      (sqlx 0.9.0 caps it at `< 0.38.0`), so even the sqlx 0.9
+      migration would not clear it. The shipped image uses
+      `sqlite::memory:` (no db/`-wal` file, so the attack cannot
+      occur). **Operators using file-backed SQLite must not open
+      database files written by untrusted parties.** Next review
+      2026-12-04; see `.cargo/audit.toml`.
+
 ## [0.5.1-alpha] - 2026-10-16
 
 **MariaDB datasource hotfix.** Patch-version bump — fixes a
