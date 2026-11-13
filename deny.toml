@@ -28,6 +28,12 @@ ignore = [
     # — no request-path attacker input. See `.cargo/audit.toml` for
     # the full write-up and the next-review date.
     "RUSTSEC-2024-0449",
+    # RUSTSEC-2026-0459 — bundled SQLite < 3.54.0 via `libsqlite3-sys`
+    # (CVE-2026-119375). No sqlx release can resolve a patched
+    # libsqlite3-sys (>= 0.39.0) yet; shipped demo is in-memory so the
+    # crafted-`-wal` precondition cannot occur. See `.cargo/audit.toml`
+    # for the full write-up and the 2026-12-04 next-review date.
+    "RUSTSEC-2026-0459",
 ]
 
 [licenses]

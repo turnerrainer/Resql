@@ -99,6 +99,49 @@ ignore = [
     # Next review 2026-12-18 (bump if serde_yaml_ng ships a parser
     # swap, or if a RUSTSEC CVE lands against unsafe-libyaml).
     "RUSTSEC-2024-0449",
+
+    # RUSTSEC-2026-0459 — `libsqlite3-sys` bundles SQLite < 3.54.0
+    # (CVE-2026-119375): SQLite can return uninitialised page-cache
+    # memory when a process opens a database file together with a
+    # sibling `-wal` file whose page size differs from the database's.
+    # Local attack vector; needs the victim to open attacker-crafted
+    # db + `-wal` files. Patched in `libsqlite3-sys >= 0.39.0`.
+    #
+    # Why this is NOT fixable by a dependency bump today:
+    #  - `sqlx-sqlite 0.8.6` pins `libsqlite3-sys ^0.30.1` (bundles
+    #    SQLite 3.46.0).
+    #  - `sqlx-sqlite 0.9.0` (latest, 2026-05-21) relaxed this to
+    #    `>=0.30.1, <0.38.0` — the newest resolvable version is 0.37.0,
+    #    which is still < 0.39.0 and still flagged. Verified in a
+    #    scratch copy on 2026-11-13: sqlx 0.9.0 +
+    #    `cargo update -p libsqlite3-sys` -> 0.37.0, `cargo audit`
+    #    still reports this advisory. So the (large, MSRV-1.94, API-
+    #    breaking) sqlx 0.9 migration would not clear it either.
+    #
+    # Why the residual risk is acceptable meanwhile:
+    #  - The shipped image uses `sqlite::memory:` for both demo
+    #    datasources. No database file and no `-wal` sibling exist, so
+    #    the crafted-file precondition cannot occur.
+    #  - File-backed SQLite is opt-in. The path comes from the
+    #    operator's `resql.yaml` (never from a request), and Resql
+    #    itself never ATTACHes or opens a file named by a caller. Only
+    #    a party who can already write into the operator-chosen data
+    #    directory could plant a crafted `-wal`.
+    #  - Operators using file-backed SQLite must ensure the data
+    #    directory is writable only by Resql (see docker-compose.yml:
+    #    a dedicated writable volume, `read_only: true` elsewhere) and
+    #    must never point a datasource at a database file or directory
+    #    supplied by an untrusted party.
+    #  - Postgres / MySQL / MariaDB datasources do not touch SQLite.
+    #
+    # Last verified 2026-11-13:
+    #  - `cargo tree -i libsqlite3-sys` -> libsqlite3-sys 0.30.1 ->
+    #    sqlx-sqlite 0.8.6 -> sqlx 0.8.6 -> resql (single path).
+    # Next review 2026-12-04 (short on purpose — this is a real
+    # advisory, not a "never reached" one). Drop this ignore as soon
+    # as a sqlx release permits `libsqlite3-sys >= 0.39.0` (watch
+    # transact-rs/sqlx; sqlx-sqlite's `libsqlite3-sys` upper bound).
+    "RUSTSEC-2026-0459",
 ]
 
 [output]
