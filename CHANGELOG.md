@@ -25,6 +25,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
       occur). **Operators using file-backed SQLite must not open
       database files written by untrusted parties.** Next review
       2026-12-04; see `.cargo/audit.toml`.
+    - **RUSTSEC-2026-0538** (quinn-udp receive loop can spin after a
+      truncated datagram, DoS): lockfile bump quinn-udp 0.5.15 →
+      0.5.16. Not reachable in Resql: `quinn` sits in `Cargo.lock` via
+      reqwest's optional HTTP/3 support but no enabled feature compiles
+      it, and the bug only affects Apple / BSD / Solaris / illumos
+      receive paths, not Linux.
 
 ## [0.5.1-alpha] - 2026-10-16
 
