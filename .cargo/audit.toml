@@ -142,6 +142,23 @@ ignore = [
     # as a sqlx release permits `libsqlite3-sys >= 0.39.0` (watch
     # transact-rs/sqlx; sqlx-sqlite's `libsqlite3-sys` upper bound).
     "RUSTSEC-2026-0459",
+
+    # RUSTSEC-2026-0543 -- `chrono` unmaintained (informational, no CVE,
+    # no patched version exists: every release is "affected").
+    # Direct dependency (date/time parameter validation and row decoding
+    # in src/query.rs) and pulled by sqlx's `chrono` feature, which is
+    # how sqlx binds/decodes DATE/TIMESTAMP/TIME on all three backends.
+    # Advisory suggests `time` or `jiff`; moving means rewriting every
+    # temporal bind/decode path in query.rs and re-testing three
+    # databases, which is tracked separately from the audit gate.
+    # No memory-safety or logic flaw is reported; the crate still builds
+    # and works, it only lacks a maintainer.
+    #
+    # Last verified 2026-11-22: `cargo update` offers no newer chrono
+    # than 0.4.45; advisory lists `patched = []`.
+    # Next review 2026-12-18. Drop this ignore when chrono is
+    # maintained again or the `time`/`jiff` migration lands.
+    "RUSTSEC-2026-0543",
 ]
 
 [output]
