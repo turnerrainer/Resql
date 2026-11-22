@@ -34,6 +34,10 @@ ignore = [
     # crafted-`-wal` precondition cannot occur. See `.cargo/audit.toml`
     # for the full write-up and the 2026-12-04 next-review date.
     "RUSTSEC-2026-0459",
+    # RUSTSEC-2026-0543 -- `chrono` unmaintained (informational, no patched
+    # version exists). Used directly and via sqlx's `chrono` feature. See
+    # `.cargo/audit.toml` for the full write-up and next-review date.
+    "RUSTSEC-2026-0543",
 ]
 
 [licenses]

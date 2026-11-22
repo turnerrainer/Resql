@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **Daily `security` workflow red again: RUSTSEC-2026-0543** (`chrono`
+  unmaintained, informational, no patched version exists). Ignored in
+  `.cargo/audit.toml` and `deny.toml` with rationale; chrono is used
+  directly and through sqlx's `chrono` feature. Review 2026-12-18; drop
+  when a `time`/`jiff` migration lands.
 - **Daily `security` workflow was red** (`cargo audit --deny warnings`
   and `cargo deny check all`). Three new advisories, all handled:
     - **RUSTSEC-2026-0386** (tokio `AsyncFd::new` I/O-safety, unsound):
