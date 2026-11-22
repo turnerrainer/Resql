@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **RUSTSEC-2026-0592** (`url` stack overflow in `Url::origin()` on nested
+  `blob:` URLs): lockfile bump url 2.5.8 → 2.5.9 (and form_urlencoded
+  1.2.2 → 1.2.3).
 - **Daily `security` workflow red again: RUSTSEC-2026-0543** (`chrono`
   unmaintained, informational, no patched version exists). Ignored in
   `.cargo/audit.toml` and `deny.toml` with rationale; chrono is used
